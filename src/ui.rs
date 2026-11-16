@@ -50,6 +50,12 @@ pub struct Ui {
     pty: Vec<usize>,
     pseg: Vec<(usize, usize)>,
     full_redraw: bool,
+    /// Bu karede baştan sona yeniden çizilecek sütunlar (imleç taşınınca)
+    force: Vec<bool>,
+    /// Sürükleme imleci (piksel)
+    cursor: Option<usize>,
+    /// Geçiş bandı piksel aralığı
+    pb: Option<(usize, usize)>,
     wf_count: u32,
     t_spec_us: u64,
     t_wf_us: u64,
@@ -58,6 +64,37 @@ pub struct Ui {
 
 /// Şelaleye kaç spektrum karesinde bir satır eklenir
 const WF_EVERY: u32 = 2;
+
+/// Üst şeritteki mod düğmeleri (QMX CAT kodları: MD1 LSB, MD2 USB, MD3 CW, MD6 DIGI)
+pub const MODES: [&str; 4] = ["LSB", "USB", "CW", "DIGI"];
+const MODE_X: i32 = 230;
+const MODE_W: i32 = 60;
+const MODE_GAP: i32 = 6;
+
+/// Üst şeritte dokunulan nokta bir mod düğmesiyse onu döndürür.
+pub fn mode_button_at(x: i32, y: i32) -> Option<&'static str> {
+    if !(4..=40).contains(&y) {
+        return None;
+    }
+    MODES.iter().enumerate().find_map(|(i, m)| {
+        let x0 = MODE_X + i as i32 * (MODE_W + MODE_GAP);
+        (x >= x0 && x < x0 + MODE_W).then_some(*m)
+    })
+}
+
+/// Seçili modun alıcı penceresi, ayar frekansına göre Hz cinsinden (alt, üst).
+/// Genişlik QMX'ten (FW) okunamazsa varsayılanlar: SSB/DIGI 2700, CW 300 Hz.
+pub fn passband(mode: &str, width: Option<u32>) -> Option<(i64, i64)> {
+    let w = |def: u32| width.filter(|&w| w > 0).unwrap_or(def) as i64;
+    match mode {
+        "USB" | "DIGI" => Some((0, w(2700))),
+        "LSB" | "DIGI-R" => Some((-w(2700), 0)),
+        "CW" | "CW-R" => Some((-w(300) / 2, w(300) / 2)),
+        "AM" => Some((-w(6000) / 2, w(6000) / 2)),
+        "FM" => Some((-w(10000) / 2, w(10000) / 2)),
+        _ => None,
+    }
+}
 
 /// Şelale renkleri: siyah → lacivert → mavi → camgöbeği → sarı → kırmızı → beyaz
 fn palette() -> [u16; 256] {
@@ -118,6 +155,9 @@ impl Ui {
             pty: vec![0; W],
             pseg: vec![(0, 0); W],
             full_redraw: true,
+            force: vec![false; W],
+            cursor: None,
+            pb: None,
             wf_count: 0,
             t_spec_us: 0,
             t_wf_us: 0,
@@ -125,9 +165,24 @@ impl Ui {
         }
     }
 
-    /// Üst şerit: frekans, mod, durum
+    /// Üst şerit: frekans, mod düğmeleri, durum
     pub fn header(&self, fb: &mut Framebuffer, dial: Option<u64>, mode: &str, status: &str, ok: bool) {
         fill(fb, 0, 0, W, HDR_H, Rgb565::new(2, 4, 3));
+        for (i, m) in MODES.iter().enumerate() {
+            let x = MODE_X + i as i32 * (MODE_W + MODE_GAP);
+            let r = Rectangle::new(Point::new(x, 6), Size::new(MODE_W as u32, 32));
+            let sel = *m == mode;
+            if sel {
+                let _ = r.into_styled(PrimitiveStyle::with_fill(Rgb565::CYAN)).draw(fb);
+            } else {
+                let _ = r
+                    .into_styled(PrimitiveStyle::with_stroke(Rgb565::new(6, 20, 14), 1))
+                    .draw(fb);
+            }
+            let tx = x + (MODE_W - m.len() as i32 * 10) / 2;
+            let c = if sel { Rgb565::BLACK } else { Rgb565::CSS_LIGHT_GRAY };
+            text(fb, m, tx, 28, c);
+        }
         if let Some(f) = dial {
             let _ = self.big.render_aligned(
                 fmt_freq(f).as_str(),
@@ -140,7 +195,10 @@ impl Ui {
         } else {
             text(fb, "QMX not connected", 14, 30, Rgb565::CSS_ORANGE);
         }
-        text(fb, mode, 300, 30, Rgb565::CYAN);
+        if !MODES.contains(&mode) && !mode.is_empty() {
+            let x = MODE_X + MODES.len() as i32 * (MODE_W + MODE_GAP);
+            text(fb, mode, x, 28, Rgb565::CYAN);
+        }
         let c = if ok { Rgb565::GREEN } else { Rgb565::CSS_ORANGE };
         let x = W as i32 - 14 - status.len() as i32 * 10;
         text(fb, status, x, 30, c);
@@ -177,8 +235,42 @@ impl Ui {
         }
     }
 
+    /// Sürükleme imlecini taşır/kaldırır (eski ve yeni sütun yeniden çizilir).
+    pub fn set_cursor(&mut self, x: Option<usize>) {
+        if x == self.cursor {
+            return;
+        }
+        for c in [self.cursor, x].into_iter().flatten() {
+            if c < W {
+                self.force[c] = true;
+            }
+        }
+        self.cursor = x.filter(|&c| c < W);
+    }
+
+    /// Geçiş bandını ayar frekansına göre Hz cinsinden ayarlar.
+    pub fn set_passband(&mut self, pb: Option<(i64, i64)>) {
+        let px = pb.map(|(a, b)| {
+            let x0 = (DIAL_X as i64 + a / HZ_PER_PX).clamp(0, W as i64 - 1) as usize;
+            let x1 = (DIAL_X as i64 + b / HZ_PER_PX).clamp(0, W as i64 - 1) as usize;
+            (x0, x1)
+        });
+        if px != self.pb {
+            self.pb = px;
+            self.full_redraw = true;
+        }
+    }
+
     /// Yeni bir spektrum karesini çizer ve şelaleye bir satır ekler.
-    pub fn frame(&mut self, fb: &mut Framebuffer, db: &[f32], dial: Option<u64>) {
+    pub fn frame(&mut self, fb: &mut Framebuffer, db: &mut [f32], dial: Option<u64>) {
+        // LO sızıntısını (merkezdeki tepe ve ±328/±656 Hz yan çizgileri) komşu
+        // bin'lerin ortalamasıyla ört: ±15 bin = ±700 Hz
+        let c = N / 2;
+        let edge = (db[c - 17] + db[c - 16] + db[c + 16] + db[c + 17]) / 4.0;
+        for v in &mut db[c - 15..=c + 15] {
+            *v = edge;
+        }
+
         // DİKKAT: ana görev yığını 16 KB; 800 elemanlı diziler yığında değil,
         // Ui içindeki önceden ayrılmış Vec'lerde tutulur.
         // Bin'leri piksel sütunlarına indir (sütun başına en büyük değer)
@@ -264,31 +356,47 @@ impl Ui {
             let r = from_bottom % step;
             from_bottom > 0.0 && r < 1.0
         };
+        let pb_bg = Rgb565::new(3, 7, 7).into_storage();
+        let pb_fill = Rgb565::new(5, 30, 13).into_storage();
+        let pb_edge = Rgb565::new(14, 28, 14).into_storage();
+        let cursorc = Rgb565::CYAN.into_storage();
+
         let dx = DIAL_X as usize;
         let full = self.full_redraw;
         self.full_redraw = false;
+        let cursor = self.cursor;
+        let (pb0, pb1) = self.pb.unwrap_or((usize::MAX, usize::MAX));
 
         for x in 0..W {
             let (s0, s1) = self.seg[x];
             let ty = self.ty[x];
-            let (lo, hi) = if full {
+            let (lo, hi) = if full || self.force[x] {
                 (SPEC_Y, SPEC_Y + SPEC_H - 1)
             } else {
                 let (p0, p1) = self.pseg[x];
                 (s0.min(p0), s1.max(p1))
             };
+            self.force[x] = false;
             let grid_col = x % 3 == 0;
+            let in_pb = pb0 != usize::MAX && x >= pb0 && x <= pb1;
+            let is_edge = x == pb0 || x == pb1;
+            let (bgc, fc) = if in_pb { (pb_bg, pb_fill) } else { (bg, fillc) };
+            let is_cursor = cursor == Some(x);
             for y in lo..=hi {
-                fb.buf[y * W + x] = if y >= s0 && y <= s1 {
+                fb.buf[y * W + x] = if is_cursor {
+                    cursorc
+                } else if y >= s0 && y <= s1 {
                     linec
                 } else if x == dx {
                     dialc
                 } else if y > ty {
-                    fillc
+                    fc
+                } else if is_edge {
+                    pb_edge
                 } else if grid_col && is_grid(y) {
                     grid
                 } else {
-                    bg
+                    bgc
                 };
             }
         }

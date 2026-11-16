@@ -58,9 +58,14 @@ fn main() -> anyhow::Result<()> {
     let mut last_hdr = Instant::now() - Duration::from_secs(1);
     let mut scale_for: Option<Option<u64>> = None;
     let mut last_seq = 0u32;
+    // Sürükleme: parmak spektrum/şelaledeyken son x; bırakınca o frekansa gidilir
+    let mut drag_x: Option<u16> = None;
     let mut pressed = false;
-    // Kendi gönderdiğimiz FA'dan sonra eski yanıtlar ekranı geri almasın
+    // Kendi gönderdiğimiz FA/MD'den sonra eski yanıtlar ekranı geri almasın
     let mut hold_dial_until = Instant::now();
+    let mut hold_mode_until = Instant::now();
+    let mut fw: Option<u32> = None;
+    let mut last_q9_fix = Instant::now() - Duration::from_secs(10);
 
     // Başarım ölçümü
     let mut frames = 0u32;
@@ -125,39 +130,79 @@ fn main() -> anyhow::Result<()> {
                 last_poll = Instant::now();
                 polls += 1;
                 // 5 sn'de bir I/Q modunu da doğrula (QMX menüsü ya da MU; kapatabilir)
-                let _ = c.send(if polls % 10 == 0 { "FA;MD;Q9;" } else { "FA;MD;" });
+                // 5 sn'de bir I/Q modunu ve filtre genişliğini de sor
+                let _ = c.send(if polls % 10 == 0 { "FA;MD;Q9;FW;" } else { "FA;MD;" });
             }
             if let Some(q) = cat_value("Q9") {
                 iq_on = q.trim() == "1";
+                // QMX menüsü ya da bazı komutlar I/Q modunu kapatabilir: yeniden aç
+                if !iq_on && last_q9_fix.elapsed() >= Duration::from_secs(4) {
+                    warn!("QMX I/Q modu kapanmış, yeniden açılıyor");
+                    let _ = c.send("Q9 1;Q9;");
+                    last_q9_fix = Instant::now();
+                }
             }
             if Instant::now() >= hold_dial_until {
                 if let Some(f) = cat_value("FA").and_then(|v| v.parse::<u64>().ok()) {
                     dial = Some(f);
                 }
             }
-            if let Some(m) = cat_value("MD") {
-                mode = mode_name(&m).to_string();
+            if Instant::now() >= hold_mode_until {
+                if let Some(m) = cat_value("MD") {
+                    mode = mode_name(&m).to_string();
+                }
             }
+            fw = cat_value("FW").and_then(|v| v.trim().parse::<u32>().ok());
         }
+        ui.set_passband(ui::passband(&mode, fw));
 
-        // Dokunarak ayar: parmak değdiği anda o frekansa git
+        // Dokunma: üst şeritte mod düğmeleri; spektrum/şelalede sürükleyip bırakınca ayar
         if let Some(t) = tp.as_mut() {
             match t.poll(&mut i2c) {
                 Some(Some((x, y))) => {
-                    if !pressed && (y as usize) >= ui::SPEC_Y {
-                        if let (Some(c), Some(d)) = (cat.as_ref(), dial) {
-                            let snap = if mode.starts_with("CW") { 10 } else { 100 };
-                            let f = (ui::x_to_freq(x as i32, d) + snap / 2) / snap * snap;
-                            info!("Dokunarak ayar: {}", ui::fmt_freq(f));
+                    if (y as usize) >= ui::SPEC_Y {
+                        if dial.is_some() {
+                            drag_x = Some(x);
+                            ui.set_cursor(Some(x as usize));
+                        }
+                    } else if !pressed {
+                        if let (Some(m), Some(c)) =
+                            (ui::mode_button_at(x as i32, y as i32), cat.as_ref())
+                        {
+                            let code = match m {
+                                "LSB" => 1,
+                                "USB" => 2,
+                                "CW" => 3,
+                                _ => 6,
+                            };
+                            info!("Mod: {m}");
                             usb::CAT_RX.lock().unwrap().clear();
-                            let _ = c.send(&format!("FA{f:011};"));
-                            dial = Some(f);
-                            hold_dial_until = Instant::now() + Duration::from_millis(700);
+                            let _ = c.send(&format!("MD{code};MD;FW;"));
+                            mode = m.to_string();
+                            fw = None;
+                            hold_mode_until = Instant::now() + Duration::from_millis(800);
+                            last_hdr = Instant::now() - Duration::from_secs(1);
                         }
                     }
                     pressed = true;
                 }
-                Some(None) => pressed = false,
+                Some(None) => {
+                    pressed = false;
+                    if let (Some(x), Some(c), Some(d)) = (drag_x.take(), cat.as_ref(), dial) {
+                        let snap = match mode.as_str() {
+                            "CW" | "CW-R" => 10,
+                            "AM" | "FM" => 1000,
+                            _ => 100,
+                        };
+                        let f = (ui::x_to_freq(x as i32, d) + snap / 2) / snap * snap;
+                        info!("Dokunarak ayar: {}", ui::fmt_freq(f));
+                        usb::CAT_RX.lock().unwrap().clear();
+                        let _ = c.send(&format!("FA{f:011};"));
+                        dial = Some(f);
+                        hold_dial_until = Instant::now() + Duration::from_millis(700);
+                    }
+                    ui.set_cursor(None);
+                }
                 None => {}
             }
         }
@@ -170,13 +215,13 @@ fn main() -> anyhow::Result<()> {
                 s.db.clone()
             })
         };
-        if let Some(db) = spec {
-            if last_peaks.elapsed() >= Duration::from_secs(3) {
+        if let Some(mut db) = spec {
+            if last_peaks.elapsed() >= Duration::from_secs(10) {
                 last_peaks = Instant::now();
                 log_peaks(&db, dial);
             }
             let t0 = Instant::now();
-            ui.frame(&mut fb, &db, dial);
+            ui.frame(&mut fb, &mut db, dial);
             draw_us += t0.elapsed().as_micros() as u64;
             frames += 1;
         }
