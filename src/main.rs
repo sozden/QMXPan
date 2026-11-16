@@ -67,6 +67,7 @@ fn main() -> anyhow::Result<()> {
     let mut draw_us = 0u64;
     let mut perf_t = Instant::now();
     let boot = Instant::now();
+    let mut last_peaks = Instant::now();
 
     loop {
         while let Ok(ev) = events.try_recv() {
@@ -170,6 +171,10 @@ fn main() -> anyhow::Result<()> {
             })
         };
         if let Some(db) = spec {
+            if last_peaks.elapsed() >= Duration::from_secs(3) {
+                last_peaks = Instant::now();
+                log_peaks(&db, dial);
+            }
             let t0 = Instant::now();
             ui.frame(&mut fb, &db, dial);
             draw_us += t0.elapsed().as_micros() as u64;
@@ -216,6 +221,40 @@ fn main() -> anyhow::Result<()> {
         }
         FreeRtos::delay_ms(5);
     }
+}
+
+/// Tanı için: spektrumdaki en güçlü 8 tepeyi mutlak frekans ve LO'ya göre
+/// konumuyla kayda yazar (ayna / iç parazit / gerçek sinyal ayrımı için).
+fn log_peaks(db: &[f32], dial: Option<u64>) {
+    let n = db.len();
+    let mut sorted = db.to_vec();
+    sorted.sort_unstable_by(|a, b| a.total_cmp(b));
+    let median = sorted[n / 2];
+    let bin_hz = 48_000.0 / n as f32;
+    let mut peaks: Vec<(f32, usize)> = (2..n - 2)
+        .filter(|&k| {
+            db[k] > median + 12.0
+                && db[k] >= db[k - 1]
+                && db[k] >= db[k + 1]
+                && db[k] >= db[k - 2]
+                && db[k] >= db[k + 2]
+        })
+        .map(|k| (db[k], k))
+        .collect();
+    peaks.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+    let lo = dial.map(|d| d as i64 - ui::LO_OFFSET);
+    let list: Vec<String> = peaks
+        .iter()
+        .take(8)
+        .map(|&(v, k)| {
+            let off = ((k as f32 - n as f32 / 2.0) * bin_hz) as i64;
+            match lo {
+                Some(lo) => format!("{}(LO{off:+}) {:.0}dB", lo + off, v - median),
+                None => format!("LO{off:+} {:.0}dB", v - median),
+            }
+        })
+        .collect();
+    info!("Tepeler [ayar {:?}, taban {:.0} dBFS]: {}", dial, median, list.join(", "));
 }
 
 /// CAT'ten gelen, verilen önekle başlayan son yanıtın değeri (ör. "FA" → "00014074000")
