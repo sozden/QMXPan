@@ -25,6 +25,7 @@ anyhow = "1"
 esp-idf-svc = { version = "0.53", features = ["critical-section"] }
 embedded-graphics = "0.8"
 u8g2-fonts = "0.8"
+embedded-svc = "0.29"
 
 [build-dependencies]
 embuild = "0.33"

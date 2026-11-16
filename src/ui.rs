@@ -166,7 +166,15 @@ impl Ui {
     }
 
     /// Üst şerit: frekans, mod düğmeleri, durum
-    pub fn header(&self, fb: &mut Framebuffer, dial: Option<u64>, mode: &str, status: &str, ok: bool) {
+    pub fn header(
+        &self,
+        fb: &mut Framebuffer,
+        dial: Option<u64>,
+        mode: &str,
+        status: &str,
+        ok: bool,
+        net: &str,
+    ) {
         fill(fb, 0, 0, W, HDR_H, Rgb565::new(2, 4, 3));
         for (i, m) in MODES.iter().enumerate() {
             let x = MODE_X + i as i32 * (MODE_W + MODE_GAP);
@@ -201,7 +209,15 @@ impl Ui {
         }
         let c = if ok { Rgb565::GREEN } else { Rgb565::CSS_ORANGE };
         let x = W as i32 - 14 - status.len() as i32 * 10;
-        text(fb, status, x, 30, c);
+        text(fb, status, x, 37, c);
+        // Ağ durumu (IP) küçük yazıyla sağ üstte
+        let nx = W as i32 - 14 - net.len() as i32 * 6;
+        let _ = Text::new(
+            net,
+            Point::new(nx, 11),
+            MonoTextStyle::new(&FONT_6X10, Rgb565::CSS_LIGHT_GRAY),
+        )
+        .draw(fb);
     }
 
     /// Frekans ölçeği: 5 kHz'de bir etiket, 1 kHz'de bir çentik

@@ -1,4 +1,4 @@
-# Kartı RESETLEMEDEN seri kaydı dosyaya yazar (DTR/RTS kapalı).
+﻿# Kartı RESETLEMEDEN seri kaydı dosyaya yazar (DTR/RTS kapalı).
 # Kullanım: tools\serlog.ps1 -Port COM23 -Seconds 120 -Out D:\QMXPan\ser.log
 param(
     [string]$Port = "COM23",

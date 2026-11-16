@@ -5,6 +5,15 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 # CMake projesi derleme klasöründe çalıştığı için mutlak yol gerekiyor
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="D:/QMXPan/partitions.csv"
 
+# OTA: yeni yazılım ilk açılışta kendini "sağlam" işaretlemezse (ör. çökerse)
+# önyükleyici bir önceki sürüme döner. USB yüklemede tools\flash.ps1 kullan
+# (espflash'ın kendi önyükleyicisinde geri dönüş kapalı).
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# HTTP sunucu (OTA ve WiFi kurulum sayfası)
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=512
+
 # PSRAM: 800x480 ekran tamponu (750 KB) burada durur
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y

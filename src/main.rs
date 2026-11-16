@@ -7,6 +7,7 @@
 mod board;
 mod dsp;
 mod lcd;
+mod net;
 mod touch;
 mod ui;
 mod usb;
@@ -39,6 +40,13 @@ fn main() -> anyhow::Result<()> {
     let mut tp = touch::Gt911::probe(&mut i2c);
     let mut fb = lcd::init()?;
     let mut ui = ui::Ui::new(&mut fb);
+
+    net::start(
+        p.modem,
+        esp_idf_svc::eventloop::EspSystemEventLoop::take()?,
+        esp_idf_svc::nvs::EspDefaultNvsPartition::take()?,
+    );
+    let mut marked_valid = false;
 
     let events = usb::start()?;
     let stats = Arc::new(Mutex::new(IqStats::default()));
@@ -75,6 +83,26 @@ fn main() -> anyhow::Result<()> {
     let mut last_peaks = Instant::now();
 
     loop {
+        // OTA bitti ya da WiFi ayarı değişti: QMX'i düzgünce bırakıp yeniden başla
+        if net::RESTART.load(std::sync::atomic::Ordering::SeqCst) {
+            info!("Yeniden başlatılıyor: önce QMX bağlantısı kapatılıyor");
+            if let Some(c) = cat.take() {
+                c.close();
+            }
+            if let Some(s) = iq.take() {
+                s.close();
+            }
+            FreeRtos::delay_ms(300);
+            usb::power_down_port();
+            FreeRtos::delay_ms(700);
+            unsafe { esp_idf_svc::sys::esp_restart() };
+        }
+        // 15 sn sorunsuz çalıştıysa bu yazılımı kalıcı yap (OTA geri dönüşünü iptal et)
+        if !marked_valid && boot.elapsed() >= Duration::from_secs(15) {
+            net::mark_valid();
+            marked_valid = true;
+        }
+
         while let Ok(ev) = events.try_recv() {
             match ev {
                 Ev::NewDev(vid, pid) => {
@@ -246,7 +274,20 @@ fn main() -> anyhow::Result<()> {
                 (Some(_), true, false) => ("IQ mode OFF".to_string(), false),
                 (Some(_), true, true) => (format!("IQ {:.1}k", s.rate / 1000.0), true),
             };
-            ui.header(&mut fb, dial, &mode, &status, ok);
+            let ota = net::OTA.load(std::sync::atomic::Ordering::Relaxed);
+            let (status, ok) = if (1..=101).contains(&ota) {
+                (format!("OTA {}%", ota.min(100)), true)
+            } else {
+                (status, ok)
+            };
+            let st = net::STATUS.lock().unwrap().clone();
+            let net_line = match st.mode {
+                net::Mode::Station => format!("WiFi {}", st.ip),
+                net::Mode::SetupAp => format!("Setup: WiFi {} -> {}", st.ssid, st.ip),
+                net::Mode::Connecting => format!("WiFi {}...", st.ssid),
+                net::Mode::Off => String::new(),
+            };
+            ui.header(&mut fb, dial, &mode, &status, ok, &net_line);
         }
 
         if perf_t.elapsed() >= Duration::from_secs(10) {

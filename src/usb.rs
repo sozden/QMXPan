@@ -79,6 +79,13 @@ pub fn start() -> anyhow::Result<Receiver<Ev>> {
     Ok(rx)
 }
 
+/// Yeniden başlatmadan önce USB portunu kapatır (QMX bağlantının bittiğini görsün).
+pub fn power_down_port() {
+    unsafe {
+        x::usb_host_lib_set_root_port_power(false);
+    }
+}
+
 // ------------------------------------------------------------ geri çağrılar
 
 unsafe extern "C" fn new_dev_cb(dev: x::usb_device_handle_t) {
@@ -286,7 +293,10 @@ impl IqStream {
         self.stop.store(true, Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(150));
         unsafe {
-            x::uac_host_device_close(self.h as x::uac_host_device_handle_t);
+            let h = self.h as x::uac_host_device_handle_t;
+            // Akışı durdur (QMX'e "alt ayar 0" gider), sonra kapat
+            x::uac_host_device_stop(h);
+            x::uac_host_device_close(h);
         }
     }
 }
