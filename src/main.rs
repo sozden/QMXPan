@@ -9,6 +9,7 @@ mod board;
 mod dsp;
 mod lcd;
 mod net;
+mod settings;
 mod touch;
 mod ui;
 mod usb;
@@ -44,6 +45,11 @@ fn main() -> anyhow::Result<()> {
 
     let nvs_part = esp_idf_svc::nvs::EspDefaultNvsPartition::take()?;
     let band_mem = bands::Memory::new(nvs_part.clone());
+    let set_store = settings::Store::new(nvs_part.clone());
+    ui.apply_settings(set_store.load());
+    let mut settings_open = false;
+    // Ayar değişince NVS'ye hemen değil, 2 sn sonra bir kez yazılır
+    let mut settings_dirty: Option<Instant> = None;
     net::start(
         p.modem,
         esp_idf_svc::eventloop::EspSystemEventLoop::take()?,
@@ -75,6 +81,8 @@ fn main() -> anyhow::Result<()> {
     // Sürükleme: parmak spektrum/şelaledeyken son x; bırakınca o frekansa gidilir
     let mut drag_x: Option<u16> = None;
     let mut pressed = false;
+    // Bir pencereyi kapatan dokunuş, parmak kalkana kadar başka iş yapmasın
+    let mut swallow = false;
     // Kendi gönderdiğimiz FA/MD'den sonra eski yanıtlar ekranı geri almasın
     let mut hold_dial_until = Instant::now();
     let mut hold_mode_until = Instant::now();
@@ -200,9 +208,38 @@ fn main() -> anyhow::Result<()> {
         // spektrum/şelalede sürükleyip bırakınca ayar
         if let Some(t) = tp.as_mut() {
             match t.poll(&mut i2c) {
+                Some(Some((x, y))) if settings_open => {
+                    if !pressed {
+                        let mut s = ui.settings();
+                        match ui::settings_hit(x as i32, y as i32) {
+                            ui::SettingsHit::Step(i, up) => s.step(i, up),
+                            ui::SettingsHit::Reset => s = settings::Settings::default(),
+                            ui::SettingsHit::Inside => {}
+                            ui::SettingsHit::Outside => {
+                                settings_open = false;
+                                ui.set_spectrum_hidden(false);
+                                scale_for = None;
+                                swallow = true;
+                            }
+                        }
+                        if settings_open && s != ui.settings() {
+                            ui.apply_settings(s);
+                            ui::draw_settings(&mut fb, &s);
+                            settings_dirty = Some(Instant::now());
+                        }
+                    }
+                    pressed = true;
+                }
                 Some(Some((x, y))) if band_popup => {
                     if !pressed {
                         match ui::band_popup_hit(x as i32, y as i32) {
+                            Some(Some(ui::SET_BUTTON)) => {
+                                band_popup = false;
+                                ui::clear_band_popup(&mut fb);
+                                settings_open = true;
+                                ui.set_spectrum_hidden(true);
+                                ui::draw_settings(&mut fb, &ui.settings());
+                            }
                             Some(Some(i)) => {
                                 if let (Some(c), Some(d)) = (cat.as_ref(), dial) {
                                     // Ayrılan bandın frekansını hatırla
@@ -215,19 +252,23 @@ fn main() -> anyhow::Result<()> {
                                     let _ = c.send(&format!("FA{f:011};"));
                                     dial = Some(f);
                                     hold_dial_until = Instant::now() + Duration::from_millis(900);
+                                    // Eski bandın şelalesi yeni frekanslarla karışmasın
+                                    ui.clear_waterfall(&mut fb);
                                 }
                                 band_popup = false;
                             }
                             Some(None) => {}
                             None => band_popup = false,
                         }
-                        if !band_popup {
+                        if !band_popup && !settings_open {
                             ui::clear_band_popup(&mut fb);
                             ui.redraw_all();
                         }
+                        swallow = true;
                     }
                     pressed = true;
                 }
+                Some(Some(_)) if swallow => pressed = true,
                 Some(Some((x, y))) => {
                     if (y as usize) >= ui::SPEC_Y {
                         if dial.is_some() {
@@ -260,6 +301,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 Some(None) => {
                     pressed = false;
+                    swallow = false;
                     if let (Some(x), Some(c), Some(d)) = (drag_x.take(), cat.as_ref(), dial) {
                         let snap = match mode.as_str() {
                             "CW" | "CW-R" => 10,
@@ -312,9 +354,14 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        if scale_for != Some(dial) {
+        if !settings_open && scale_for != Some(dial) {
             ui.scale(&mut fb, dial);
             scale_for = Some(dial);
+        }
+        if settings_dirty.is_some_and(|t| t.elapsed() >= Duration::from_secs(2)) {
+            set_store.save(&ui.settings());
+            info!("Görüntü ayarları kaydedildi: {:?}", ui.settings());
+            settings_dirty = None;
         }
 
         if last_hdr.elapsed() >= Duration::from_millis(200) {

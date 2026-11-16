@@ -28,8 +28,6 @@ pub const HZ_PER_PX: i64 = 60;
 /// QMX'te LO, ayar frekansının bu kadar altında
 pub const LO_OFFSET: i64 = 12_000;
 pub const DIAL_X: i32 = (W as i64 / 2 + LO_OFFSET / HZ_PER_PX) as i32;
-/// Spektrumda gösterilen dB aralığı
-const RANGE_DB: f32 = 70.0;
 
 pub struct Ui {
     big: FontRenderer,
@@ -38,6 +36,10 @@ pub struct Ui {
     /// Görüntü alt sınırı (gürültü tabanını yavaşça izler)
     floor: f32,
     palette: [u16; 256],
+    /// Kullanıcı görüntü ayarları
+    set: crate::settings::Settings,
+    /// Ayar paneli açıkken spektrum çizilmez (şelale akmaya devam eder)
+    spectrum_hidden: bool,
     /// Şelalenin çizildiği ayar frekansı (kaydırma için)
     wf_dial: Option<u64>,
     wf_acc: Vec<f32>,
@@ -62,8 +64,6 @@ pub struct Ui {
     wf_lines: u32,
 }
 
-/// Şelaleye kaç spektrum karesinde bir satır eklenir
-const WF_EVERY: u32 = 2;
 
 /// Üst şeritteki mod düğmeleri (QMX CAT kodları: MD1 LSB, MD2 USB, MD3 CW, MD6 DIGI)
 pub const MODES: [&str; 4] = ["LSB", "USB", "CW", "DIGI"];
@@ -164,7 +164,114 @@ pub fn draw_band_popup(fb: &mut Framebuffer, current: Option<usize>) {
         let tx = x + (BB_W - b.name.len() as i32 * 10) / 2;
         text(fb, b.name, tx, y + 40, if sel { Rgb565::BLACK } else { Rgb565::WHITE });
     }
+    // Son kutu: görüntü ayarları
+    let (x, y) = band_button_rect(SET_BUTTON);
+    let _ = Rectangle::new(Point::new(x, y), Size::new(BB_W as u32, BB_H as u32))
+        .into_styled(PrimitiveStyle::with_stroke(Rgb565::CSS_ORANGE, 2))
+        .draw(fb);
+    text(fb, "SET", x + (BB_W - 30) / 2, y + 40, Rgb565::CSS_ORANGE);
 }
+
+// ---------------------------------------------------------- ayar paneli
+// Spektrum + ölçek alanının üstünde açılır; şelale altta akmaya devam eder.
+
+const SP_Y: i32 = SPEC_Y as i32;
+const SP_H: i32 = (WF_Y - SPEC_Y) as i32;
+const SP_ROW0: i32 = SP_Y + 30;
+const SP_ROW_H: i32 = 48;
+const SP_COL_W: i32 = 395;
+const SP_MINUS_X: i32 = 150;
+const SP_PLUS_X: i32 = 305;
+const SP_BTN: (i32, i32) = (48, 40);
+const SP_RESET: (i32, i32, i32, i32) = (690, SP_Y + 3, 100, 24);
+
+const SET_LABELS: [&str; 6] = [
+    "WF bright",
+    "WF contrast",
+    "Spec range",
+    "WF speed",
+    "Palette",
+    "Smoothing",
+];
+
+pub enum SettingsHit {
+    Step(usize, bool),
+    Reset,
+    Inside,
+    Outside,
+}
+
+fn set_cell(i: usize) -> (i32, i32) {
+    (10 + (i % 2) as i32 * SP_COL_W, SP_ROW0 + (i / 2) as i32 * SP_ROW_H)
+}
+
+fn set_value(s: &crate::settings::Settings, i: usize) -> String {
+    match i {
+        0 => format!("{:+} dB", s.wf_bright),
+        1 | 2 => format!("{} dB", s.get(i)),
+        3 => format!("{:.0} /s", 23.4 / s.wf_every as f32),
+        4 => PALETTES[s.palette as usize].0.to_string(),
+        _ => format!("{}%", s.smooth),
+    }
+}
+
+/// Ayar panelini çizer.
+pub fn draw_settings(fb: &mut Framebuffer, s: &crate::settings::Settings) {
+    fill(fb, 0, SP_Y as usize, W, SP_H as usize, Rgb565::new(3, 6, 5));
+    let _ = Rectangle::new(Point::new(0, SP_Y), Size::new(W as u32, SP_H as u32))
+        .into_styled(PrimitiveStyle::with_stroke(Rgb565::CSS_ORANGE, 2))
+        .draw(fb);
+    text(fb, "Display settings", 12, SP_Y + 21, Rgb565::WHITE);
+    let _ = Text::new(
+        "tap the waterfall to close",
+        Point::new(200, SP_Y + 18),
+        MonoTextStyle::new(&FONT_6X10, Rgb565::CSS_GRAY),
+    )
+    .draw(fb);
+    let (rx, ry, rw, rh) = SP_RESET;
+    let _ = Rectangle::new(Point::new(rx, ry), Size::new(rw as u32, rh as u32))
+        .into_styled(PrimitiveStyle::with_stroke(Rgb565::CSS_GRAY, 1))
+        .draw(fb);
+    text(fb, "Reset", rx + 25, ry + 18, Rgb565::CSS_LIGHT_GRAY);
+
+    for i in 0..6 {
+        let (x, y) = set_cell(i);
+        text(fb, SET_LABELS[i], x + 4, y + 28, Rgb565::CSS_LIGHT_GRAY);
+        for (bx, sym) in [(SP_MINUS_X, "-"), (SP_PLUS_X, "+")] {
+            let sym = if i == 4 { if sym == "-" { "<" } else { ">" } } else { sym };
+            let _ = Rectangle::new(Point::new(x + bx, y + 2), Size::new(SP_BTN.0 as u32, SP_BTN.1 as u32))
+                .into_styled(PrimitiveStyle::with_stroke(Rgb565::CYAN, 2))
+                .draw(fb);
+            text(fb, sym, x + bx + 19, y + 29, Rgb565::CYAN);
+        }
+        let v = set_value(s, i);
+        let vx = x + (SP_MINUS_X + SP_BTN.0 + SP_PLUS_X) / 2 - v.len() as i32 * 5;
+        text(fb, &v, vx, y + 28, Rgb565::WHITE);
+    }
+}
+
+pub fn settings_hit(x: i32, y: i32) -> SettingsHit {
+    if y < SP_Y || y >= SP_Y + SP_H {
+        return SettingsHit::Outside;
+    }
+    let (rx, ry, rw, rh) = SP_RESET;
+    if x >= rx && x < rx + rw && y >= ry - 4 && y < ry + rh + 4 {
+        return SettingsHit::Reset;
+    }
+    for i in 0..6 {
+        let (cx, cy) = set_cell(i);
+        // Parmak için düğmelerden biraz geniş dokunma alanı
+        for (bx, up) in [(SP_MINUS_X, false), (SP_PLUS_X, true)] {
+            if x >= cx + bx - 8 && x < cx + bx + SP_BTN.0 + 8 && y >= cy - 4 && y < cy + SP_BTN.1 + 8 {
+                return SettingsHit::Step(i, up);
+            }
+        }
+    }
+    SettingsHit::Inside
+}
+
+/// Band penceresindeki "SET" (görüntü ayarları) düğmesinin sırası
+pub const SET_BUTTON: usize = crate::bands::BANDS.len();
 
 /// Band penceresinde dokunulan yer: Some(Some(i)) düğme, Some(None) pencere içi boşluk,
 /// None pencere dışı.
@@ -172,7 +279,7 @@ pub fn band_popup_hit(x: i32, y: i32) -> Option<Option<usize>> {
     if x < BP_X || x >= BP_X + BP_W || y < BP_Y || y >= BP_Y + BP_H {
         return None;
     }
-    Some((0..crate::bands::BANDS.len()).find(|&i| {
+    Some((0..=SET_BUTTON).find(|&i| {
         let (bx, by) = band_button_rect(i);
         x >= bx && x < bx + BB_W && y >= by && y < by + BB_H
     }))
@@ -208,21 +315,44 @@ pub fn passband(mode: &str, width: Option<u32>) -> Option<(i64, i64)> {
     }
 }
 
-/// Şelale renkleri: siyah → lacivert → mavi → camgöbeği → sarı → kırmızı → beyaz
-fn palette() -> [u16; 256] {
-    let stops: [(f32, (f32, f32, f32)); 7] = [
-        (0.00, (0.0, 0.0, 0.0)),
-        (0.15, (0.0, 0.0, 0.35)),
-        (0.35, (0.0, 0.25, 0.85)),
-        (0.55, (0.0, 0.85, 0.85)),
-        (0.72, (1.0, 0.95, 0.0)),
-        (0.88, (1.0, 0.15, 0.0)),
-        (1.00, (1.0, 1.0, 1.0)),
-    ];
+/// Şelale paletleri: (ad, renk durakları)
+type Stops = &'static [(f32, (f32, f32, f32))];
+pub const PALETTES: [(&str, Stops); 3] = [
+    // siyah → lacivert → mavi → camgöbeği → sarı → kırmızı → beyaz
+    (
+        "Classic",
+        &[
+            (0.00, (0.0, 0.0, 0.0)),
+            (0.15, (0.0, 0.0, 0.35)),
+            (0.35, (0.0, 0.25, 0.85)),
+            (0.55, (0.0, 0.85, 0.85)),
+            (0.72, (1.0, 0.95, 0.0)),
+            (0.88, (1.0, 0.15, 0.0)),
+            (1.00, (1.0, 1.0, 1.0)),
+        ],
+    ),
+    ("Gray", &[(0.0, (0.0, 0.0, 0.0)), (1.0, (1.0, 1.0, 1.0))]),
+    // siyah → koyu kahve → kehribar → açık sarı
+    (
+        "Amber",
+        &[
+            (0.00, (0.0, 0.0, 0.0)),
+            (0.40, (0.35, 0.12, 0.0)),
+            (0.75, (1.0, 0.6, 0.0)),
+            (1.00, (1.0, 1.0, 0.7)),
+        ],
+    ),
+];
+
+fn palette(idx: usize) -> [u16; 256] {
+    let stops = PALETTES[idx.min(PALETTES.len() - 1)].1;
     let mut p = [0u16; 256];
     for (i, out) in p.iter_mut().enumerate() {
         let t = i as f32 / 255.0;
-        let k = stops.windows(2).position(|w| t <= w[1].0).unwrap_or(5);
+        let k = stops
+            .windows(2)
+            .position(|w| t <= w[1].0)
+            .unwrap_or(stops.len() - 2);
         let (t0, c0) = stops[k];
         let (t1, c1) = stops[k + 1];
         let f = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
@@ -257,7 +387,9 @@ impl Ui {
             big: FontRenderer::new::<fonts::u8g2_font_logisoso28_tn>(),
             smooth: vec![-120.0; W],
             floor: -110.0,
-            palette: palette(),
+            palette: palette(0),
+            set: crate::settings::Settings::default(),
+            spectrum_hidden: false,
             wf_dial: None,
             wf_acc: vec![f32::MIN; W],
             col: vec![0.0; W],
@@ -372,6 +504,34 @@ impl Ui {
         self.full_redraw = true;
     }
 
+    pub fn settings(&self) -> crate::settings::Settings {
+        self.set
+    }
+
+    /// Yeni ayarları uygular (palet değiştiyse yeniden üretilir).
+    pub fn apply_settings(&mut self, s: crate::settings::Settings) {
+        if s.palette != self.set.palette {
+            self.palette = palette(s.palette as usize);
+        }
+        if s.spec_range != self.set.spec_range {
+            self.full_redraw = true;
+        }
+        self.set = s;
+    }
+
+    pub fn set_spectrum_hidden(&mut self, hidden: bool) {
+        self.spectrum_hidden = hidden;
+        if !hidden {
+            self.full_redraw = true;
+        }
+    }
+
+    /// Şelaleyi tamamen siler (band değişince eski bandın izleri kalmasın).
+    pub fn clear_waterfall(&mut self, fb: &mut Framebuffer) {
+        fb.buf[WF_Y * W..(WF_Y + WF_H) * W].fill(0);
+        self.wf_dial = None;
+    }
+
     /// Sürükleme imlecini taşır/kaldırır (eski ve yeni sütun yeniden çizilir).
     pub fn set_cursor(&mut self, x: Option<usize>) {
         if x == self.cursor {
@@ -411,11 +571,12 @@ impl Ui {
         // DİKKAT: ana görev yığını 16 KB; 800 elemanlı diziler yığında değil,
         // Ui içindeki önceden ayrılmış Vec'lerde tutulur.
         // Bin'leri piksel sütunlarına indir (sütun başına en büyük değer)
+        let a = self.set.smooth as f32 / 100.0;
         for x in 0..W {
             let b0 = x * N / W;
             let b1 = ((x + 1) * N / W).max(b0 + 1);
             self.col[x] = db[b0..b1].iter().cloned().fold(f32::MIN, f32::max);
-            self.smooth[x] = self.smooth[x] * 0.5 + self.col[x] * 0.5;
+            self.smooth[x] = self.smooth[x] * a + self.col[x] * (1.0 - a);
         }
 
         // Gürültü tabanı: sütunların %20'lik dilimi; görüntü sınırı onu yavaşça izler
@@ -424,19 +585,21 @@ impl Ui {
         let nf = self.sorted[W / 5];
         self.floor += (nf - 6.0 - self.floor) * 0.05;
         let bottom = self.floor;
-        let top = bottom + RANGE_DB;
+        let top = bottom + self.set.spec_range as f32;
 
-        let t0 = std::time::Instant::now();
-        self.draw_spectrum(fb, bottom, top);
-        self.t_spec_us += t0.elapsed().as_micros() as u64;
+        if !self.spectrum_hidden {
+            let t0 = std::time::Instant::now();
+            self.draw_spectrum(fb, bottom, top);
+            self.t_spec_us += t0.elapsed().as_micros() as u64;
+        }
 
-        // Şelale satırı her kareye değil, her WF_EVERY karede bir (PSRAM bant genişliği):
+        // Şelale satırı her kareye değil, her wf_every karede bir (PSRAM bant genişliği):
         // aradaki karelerin en büyük değeri biriktirilir, kısa sinyaller kaybolmaz
         for x in 0..W {
             self.wf_acc[x] = self.wf_acc[x].max(self.col[x]);
         }
         self.wf_count += 1;
-        if self.wf_count >= WF_EVERY {
+        if self.wf_count >= self.set.wf_every as u32 {
             let t1 = std::time::Instant::now();
             let acc = core::mem::take(&mut self.wf_acc);
             self.waterfall_line(fb, &acc, dial);
@@ -470,8 +633,9 @@ impl Ui {
         let fillc = Rgb565::new(3, 22, 8).into_storage();
         let linec = Rgb565::new(16, 63, 20).into_storage();
 
+        let range = self.set.spec_range as f32;
         let to_y = |v: f32| -> usize {
-            let t = ((v - bottom) / RANGE_DB).clamp(0.0, 1.0);
+            let t = ((v - bottom) / range).clamp(0.0, 1.0);
             SPEC_Y + SPEC_H - 1 - (t * (SPEC_H - 1) as f32) as usize
         };
         // Bir önceki karenin durumunu sakla, yenisini hesapla
@@ -489,7 +653,7 @@ impl Ui {
         // (dB değerine bağlı değil, böylece taban kayınca ızgara yer değiştirmez)
         let is_grid = |y: usize| {
             let from_bottom = (SPEC_Y + SPEC_H - 1 - y) as f32;
-            let step = SPEC_H as f32 * 10.0 / RANGE_DB;
+            let step = SPEC_H as f32 * 10.0 / range;
             let r = from_bottom % step;
             from_bottom > 0.0 && r < 1.0
         };
@@ -558,8 +722,9 @@ impl Ui {
         let start = WF_Y * W;
         let end = (WF_Y + WF_H - 1) * W;
         fb.buf.copy_within(start..end, start + W);
-        let lo = self.floor + 3.0;
-        let span = RANGE_DB * 0.75;
+        // Parlaklık eşiği aşağı çeker (zayıf sinyaller renklenir), kontrast skalayı daraltır
+        let lo = self.floor + 3.0 - self.set.wf_bright as f32;
+        let span = self.set.wf_span as f32;
         for x in 0..W {
             let t = ((col[x] - lo) / span).clamp(0.0, 1.0);
             fb.buf[start + x] = self.palette[(t * 255.0) as usize];
