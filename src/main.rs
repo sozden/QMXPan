@@ -9,6 +9,7 @@ mod bands;
 mod board;
 mod cw;
 mod dsp;
+mod dx;
 mod fonts;
 mod ft8;
 mod morse;
@@ -63,11 +64,14 @@ fn main() -> anyhow::Result<()> {
     let mut panel = ui::Panel::None;
     // FT8: 0 kapalı, 1 liste, 2 şelale + spektrum etiketleri
     let mut ft8_mode: u8 = 0;
+    let mut ft8_labels: Vec<ui::Label> = Vec::new();
+    let mut labels_t = Instant::now();
     let mut cw_drawn: Option<(String, cw::Stat, Option<u64>)> = None;
     let mut ft8_drawn: Option<(u32, bool)> = None;
     ft8::start();
     // Ayar değişince NVS'ye hemen değil, 2 sn sonra bir kez yazılır
     let mut settings_dirty: Option<Instant> = None;
+    dx::start(nvs_part.clone());
     net::start(
         p.modem,
         esp_idf_svc::eventloop::EspSystemEventLoop::take()?,
@@ -98,6 +102,7 @@ fn main() -> anyhow::Result<()> {
     let mut last_seq = 0u32;
     // Sürükleme: parmak spektrum/şelaledeyken son x; bırakınca o frekansa gidilir
     let mut drag_x: Option<u16> = None;
+    let mut drag_start: Option<(i32, i32)> = None;
     let mut pressed = false;
     // Bir pencereyi kapatan dokunuş, parmak kalkana kadar başka iş yapmasın
     let mut swallow = false;
@@ -299,6 +304,9 @@ fn main() -> anyhow::Result<()> {
                 Some(Some((x, y))) => {
                     if (ui::SPEC_Y..ui::WF_Y + ui::WF_H).contains(&(y as usize)) {
                         if dial.is_some() {
+                            if drag_x.is_none() {
+                                drag_start = Some((x as i32, y as i32));
+                            }
                             drag_x = Some(x);
                             ui.set_cursor(Some(x as usize));
                         }
@@ -388,13 +396,19 @@ fn main() -> anyhow::Result<()> {
                 Some(None) => {
                     pressed = false;
                     swallow = false;
+                    let start = drag_start.take();
                     if let (Some(x), Some(c), Some(d)) = (drag_x.take(), cat.as_ref(), dial) {
                         let snap = match mode.as_str() {
                             "CW" | "CW-R" => 10,
                             "AM" | "FM" => 1000,
                             _ => 100,
                         };
-                        let f = (ui.view().x_to_freq(x as i32, d) + snap / 2) / snap * snap;
+                        // Bir etikete kısa dokunuş: tam o istasyonun frekansına git
+                        let on_label = start
+                            .filter(|&(sx, _)| (sx - x as i32).abs() < 12)
+                            .and_then(|(sx, sy)| ui.label_at(sx, sy));
+                        let f = on_label
+                            .unwrap_or_else(|| (ui.view().x_to_freq(x as i32, d) + snap / 2) / snap * snap);
                         info!("Dokunarak ayar: {}", ui::fmt_freq(f));
                         usb::CAT_RX.lock().unwrap().clear();
                         let _ = c.send(&format!("FA{f:011};"));
@@ -463,7 +477,7 @@ fn main() -> anyhow::Result<()> {
                     ui.draw_ft8_panel(&mut fb, &msgs, &st, MYCALL);
                 }
                 // Son dilimde çözülen istasyonlar spektrumda etiketlenir
-                let labels = msgs
+                ft8_labels = msgs
                     .iter()
                     .filter(|m| m.slot == st.last_slot && m.dial != 0)
                     .filter_map(|m| {
@@ -478,11 +492,29 @@ fn main() -> anyhow::Result<()> {
                         Some(ui::Label { rf: m.dial + m.freq as u64, text: call, color })
                     })
                     .collect();
-                ui.set_labels(labels);
                 ft8_drawn = Some(now);
+                labels_t = Instant::now() - Duration::from_secs(1);
             }
         } else if ft8_mode == 0 {
-            ui.set_labels(Vec::new());
+            ft8_labels.clear();
+        }
+        // Spektrum etiketleri: FT8 çözümleri + görünür aralıktaki DX cluster spotları
+        if labels_t.elapsed() >= Duration::from_millis(500) {
+            labels_t = Instant::now();
+            let mut labels = ft8_labels.clone();
+            if let Some(d) = dial {
+                let v = ui.view();
+                let c = v.center(d);
+                let half = v.px_to_hz(ui::W_HALF);
+                let lo = (c - half).max(0) as u64;
+                let hi = (c + half).max(0) as u64;
+                for s in dx::in_range(lo, hi) {
+                    if !labels.iter().any(|l| l.text == s.call) {
+                        labels.push(ui::Label { rf: s.freq_hz, text: s.call, color: gfx::th::VI });
+                    }
+                }
+            }
+            ui.set_labels(labels);
         }
         if settings_dirty.is_some_and(|t| t.elapsed() >= Duration::from_secs(2)) {
             set_store.save(&ui.settings());
@@ -513,7 +545,14 @@ fn main() -> anyhow::Result<()> {
             };
             let st = net::STATUS.lock().unwrap().clone();
             let net_line = match st.mode {
-                net::Mode::Station => st.ip.clone(),
+                net::Mode::Station => {
+                    let n = dx::SPOTS.lock().unwrap().len();
+                    if dx::STATE.lock().unwrap().as_str() == "connected" {
+                        format!("DX {n} · {}", st.ip)
+                    } else {
+                        st.ip.clone()
+                    }
+                }
                 net::Mode::SetupAp => format!("Setup: {} -> {}", st.ssid, st.ip),
                 net::Mode::Connecting => format!("WiFi {}...", st.ssid),
                 net::Mode::Off => String::new(),

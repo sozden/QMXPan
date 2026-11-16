@@ -192,8 +192,10 @@ const PAGE_HEAD: &str = "<!doctype html><html><head><meta charset=utf-8>\
 input,button{font-size:16px;padding:8px;margin:4px 0;width:100%;box-sizing:border-box}\
 h1{font-size:20px}code{color:#7fd}</style></head><body><h1>QMXPan</h1>";
 
-fn index_page() -> String {
+fn index_page(dx: &crate::dx::Cfg) -> String {
     let st = STATUS.lock().unwrap().clone();
+    let dx_state = crate::dx::STATE.lock().unwrap().clone();
+    let dx_n = crate::dx::SPOTS.lock().unwrap().len();
     let wifi = match st.mode {
         Mode::Station => format!("Connected to <b>{}</b> ({})", html_escape(&st.ssid), st.ip),
         Mode::SetupAp => "Setup mode (no WiFi network saved or reachable)".to_string(),
@@ -211,7 +213,18 @@ fn index_page() -> String {
 then enter its level:</p><form method=post action=/cal>\
 <input name=dbm type=number step=0.1 placeholder='Signal level in dBm, e.g. -73'>\
 <button>Calibrate</button></form>\
+<h2>DX cluster</h2><p>State: {dx_state} · {dx_n} spots</p>\
+<form method=post action=/dx>\
+<label><input type=checkbox name=on value=1 {dx_on} style='width:auto'> Enabled</label>\
+<input name=host value='{dx_host}' placeholder='Host, e.g. dxc.ve7cc.net' required>\
+<input name=port type=number value='{dx_port}' placeholder='Port' required>\
+<input name=call value='{dx_call}' placeholder='Your callsign (sent to the cluster)' required>\
+<button>Save</button></form>\
 <p>Firmware update: <code>tools\\ota.ps1 -Kart {ip}</code></p></body></html>",
+        dx_on = if dx.on { "checked" } else { "" },
+        dx_host = html_escape(&dx.host),
+        dx_port = dx.port,
+        dx_call = html_escape(&dx.call),
         ver = env!("CARGO_PKG_VERSION"),
         ip = if st.ip.is_empty() { "IP" } else { &st.ip },
         now = now_dbm()
@@ -285,10 +298,38 @@ fn http_server(nvs: std::sync::Arc<Mutex<EspNvs<NvsDefault>>>) -> Result<EspHttp
         ..Default::default()
     })?;
 
-    server.fn_handler("/", Method::Get, |req| -> Result<()> {
-        req.into_ok_response()?.write_all(index_page().as_bytes())?;
-        Ok(())
-    })?;
+    {
+        let nvs = nvs.clone();
+        server.fn_handler("/", Method::Get, move |req| -> Result<()> {
+            let dx = crate::dx::load_cfg(&nvs.lock().unwrap());
+            req.into_ok_response()?.write_all(index_page(&dx).as_bytes())?;
+            Ok(())
+        })?;
+    }
+
+    {
+        let nvs = nvs.clone();
+        server.fn_handler("/dx", Method::Post, move |mut req| -> Result<()> {
+            let body = read_body(&mut req, 512)?;
+            let body = String::from_utf8_lossy(&body);
+            let host = form_value(&body, "host").unwrap_or_default().trim().to_string();
+            let call = form_value(&body, "call").unwrap_or_default().trim().to_ascii_uppercase();
+            let port = form_value(&body, "port").and_then(|p| p.trim().parse::<u16>().ok());
+            let (Some(port), false, false) = (port, host.is_empty() || host.len() > 60, call.len() < 3 || call.len() > 12) else {
+                req.into_status_response(400)?.write_all(b"invalid host, port or callsign\n")?;
+                return Ok(());
+            };
+            let cfg = crate::dx::Cfg { on: form_value(&body, "on").is_some(), host, port, call };
+            crate::dx::save_cfg(&nvs.lock().unwrap(), &cfg)?;
+            crate::dx::RELOAD.store(true, Ordering::SeqCst);
+            info!("DX cluster ayarları kaydedildi: {cfg:?}");
+            req.into_ok_response()?.write_all(
+                format!("{PAGE_HEAD}<p>Saved. Reconnecting to the DX cluster.</p><p><a href=/>Back</a></p></body></html>")
+                    .as_bytes(),
+            )?;
+            Ok(())
+        })?;
+    }
 
     let nvs_w = nvs.clone();
     server.fn_handler("/wifi", Method::Post, move |mut req| -> Result<()> {
@@ -345,6 +386,23 @@ fn http_server(nvs: std::sync::Arc<Mutex<EspNvs<NvsDefault>>>) -> Result<EspHttp
             Ok(())
         })?;
     }
+
+    // DX cluster durumu ve son spotlar (düz metin)
+    server.fn_handler("/api/dx", Method::Get, |req| -> Result<()> {
+        let mut out = format!("state {}\n", crate::dx::STATE.lock().unwrap());
+        for s in crate::dx::SPOTS.lock().unwrap().iter().rev().take(40) {
+            out.push_str(&format!(
+                "{:>9.1} {:<10} de {:<10} {}s ago  {}\n",
+                s.freq_hz as f64 / 1000.0,
+                s.call,
+                s.spotter,
+                s.at.elapsed().as_secs(),
+                s.comment
+            ));
+        }
+        req.into_ok_response()?.write_all(out.as_bytes())?;
+        Ok(())
+    })?;
 
     // Son FT8 çözümleri (düz metin)
     server.fn_handler("/api/ft8", Method::Get, |req| -> Result<()> {

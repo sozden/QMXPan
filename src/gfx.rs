@@ -23,6 +23,8 @@ pub mod th {
     pub const AM: u16 = rgb(0xfbbf24);
     pub const GR: u16 = rgb(0x34d399);
     pub const RD: u16 = rgb(0xf87171);
+    /// DX cluster spotları
+    pub const VI: u16 = rgb(0xa78bfa);
     /// Spektrum panelinin zemini
     pub const SPEC_BG: u16 = rgb(0x0c1424);
     /// LO (veri yok) bÃ¶lgesi ve tarama Ã§izgileri

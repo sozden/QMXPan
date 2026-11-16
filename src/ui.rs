@@ -47,6 +47,8 @@ const KEY_H: i32 = 30;
 
 /// QMX'te LO, ayar frekansının bu kadar altında
 pub const LO_OFFSET: i64 = 12_000;
+/// Ekranın yarı genişliği (piksel)
+pub const W_HALF: i64 = W as i64 / 2;
 
 /// Yatay eksen: büyütmeye göre Hz/piksel, ayar çizgisinin yeri, LO bölgesi.
 /// ×1: 48 kHz, ortada LO, ayar çizgisi x=600. Büyütmede ortada ayar frekansı.
@@ -278,6 +280,8 @@ pub struct Ui {
     view: View,
     /// Spektrumun üstündeki istasyon etiketleri
     labels: Vec<Label>,
+    /// Çizilen etiketlerin ekran dikdörtgenleri ve RF frekansları
+    label_hits: Vec<(i32, i32, i32, i32, u64)>,
     ft8_key: &'static str,
     wf_acc: Vec<f32>,
     wf_count: u32,
@@ -326,6 +330,7 @@ impl Ui {
             wf_dial: None,
             view: View { zoom: 1 },
             labels: Vec::new(),
+            label_hits: Vec::new(),
             ft8_key: "FT8",
             wf_acc: vec![f32::MIN; W],
             wf_count: 0,
@@ -668,6 +673,14 @@ impl Ui {
         self.view
     }
 
+    /// Ekranda (x, y) noktasındaki etiketin RF frekansı (dokunarak tam ayar için)
+    pub fn label_at(&self, x: i32, y: i32) -> Option<u64> {
+        self.label_hits
+            .iter()
+            .find(|(x0, y0, x1, y1, _)| x >= *x0 - 3 && x < *x1 + 3 && y >= *y0 - 3 && y < *y1 + 3)
+            .map(|h| h.4)
+    }
+
     /// FT8 tuşunun yazısı ("FT8", "FT8 LIST", "FT8 WF")
     pub fn set_ft8_key(&mut self, s: &'static str) {
         self.ft8_key = s;
@@ -894,12 +907,14 @@ impl Ui {
                 .collect();
             placed.sort_by_key(|(x, _)| *x);
             let mut row_end = [i32::MIN; 3];
+            let mut hits = Vec::new();
             for (x, l) in placed {
                 let w = gfx::text_w(&F_R11, &l.text) + 8;
                 let x0 = (x - w / 2).clamp(38, W as i32 - w - 2);
                 if let Some(r) = (0..3).find(|&r| row_end[r] + 3 < x0) {
                     row_end[r] = x0 + w;
                     let y = 22 + r as i32 * 15;
+                    hits.push((x0, SPEC_Y as i32 + y, x0 + w, SPEC_Y as i32 + y + 13, l.rf));
                     gfx::fill(o, x0, y, w, 13, th::SPEC_BG);
                     rrect(o, x0, y, w, 13, 4, th::PN2);
                     text(o, &F_R11, x0 + 4, y + 10, &l.text, l.color);
@@ -912,6 +927,9 @@ impl Ui {
                     }
                 }
             }
+            self.label_hits = hits;
+        } else {
+            self.label_hits.clear();
         }
         if let Some(d) = dial {
             let s = fmt_freq(d);
