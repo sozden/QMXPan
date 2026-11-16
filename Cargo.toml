@@ -1,6 +1,6 @@
 [package]
 name = "qmxpan"
-version = "0.8.0"
+version = "0.9.1"
 authors = ["Şadan Özden"]
 edition = "2021"
 resolver = "2"

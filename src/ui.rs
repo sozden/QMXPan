@@ -118,6 +118,15 @@ const KEYS: [(Key, &str, bool); 6] = [
 /// Şelalenin altındaki CW metin paneli yüksekliği
 const PANEL_H: usize = 52;
 
+/// Spektrumda gösterilen istasyon etiketi (FT8 çözümleri)
+#[derive(Clone, PartialEq, Debug)]
+pub struct Label {
+    /// Sinyalin RF frekansı (Hz)
+    pub rf: u64,
+    pub text: String,
+    pub color: u16,
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Panel {
     None,
@@ -267,6 +276,9 @@ pub struct Ui {
     wf_dial: Option<i64>,
     /// Yatay eksen (büyütme)
     view: View,
+    /// Spektrumun üstündeki istasyon etiketleri
+    labels: Vec<Label>,
+    ft8_key: &'static str,
     wf_acc: Vec<f32>,
     wf_count: u32,
     // Kare başına geçici tamponlar (ana görev yığını küçük; burada tutulur)
@@ -313,6 +325,8 @@ impl Ui {
             spectrum_hidden: false,
             wf_dial: None,
             view: View { zoom: 1 },
+            labels: Vec::new(),
+            ft8_key: "FT8",
             wf_acc: vec![f32::MIN; W],
             wf_count: 0,
             col: vec![0.0; W],
@@ -499,6 +513,8 @@ impl Ui {
             let label = if *k == Key::Zoom && self.view.zoom > 1 {
                 zl = format!("ZOOM x{}", self.view.zoom);
                 zl.as_str()
+            } else if *k == Key::Ft8 {
+                self.ft8_key
             } else {
                 label
             };
@@ -650,6 +666,20 @@ impl Ui {
 
     pub fn view(&self) -> View {
         self.view
+    }
+
+    /// FT8 tuşunun yazısı ("FT8", "FT8 LIST", "FT8 WF")
+    pub fn set_ft8_key(&mut self, s: &'static str) {
+        self.ft8_key = s;
+    }
+
+    /// İstasyon etiketlerini değiştirir (üst katman yeniden kurulur).
+    pub fn set_labels(&mut self, labels: Vec<Label>) {
+        if labels != self.labels {
+            self.labels = labels;
+            self.over_for = None;
+            self.full_redraw = true;
+        }
     }
 
     /// Büyütmeyi değiştirir: eksen, katmanlar ve şelale baştan kurulur.
@@ -852,6 +882,36 @@ impl Ui {
                 o.buf[i] = th::AM;
             }
             i += stride;
+        }
+        // İstasyon etiketleri: frekans sırasıyla, çakışmayacak şekilde 3 satıra
+        if let Some(d) = dial {
+            let v = self.view;
+            let mut placed: Vec<(i32, &Label)> = self
+                .labels
+                .iter()
+                .map(|l| (dx + v.hz_to_px(l.rf as i64 - d as i64) as i32, l))
+                .filter(|(x, _)| (40..W as i32 - 10).contains(x))
+                .collect();
+            placed.sort_by_key(|(x, _)| *x);
+            let mut row_end = [i32::MIN; 3];
+            for (x, l) in placed {
+                let w = gfx::text_w(&F_R11, &l.text) + 8;
+                let x0 = (x - w / 2).clamp(38, W as i32 - w - 2);
+                if let Some(r) = (0..3).find(|&r| row_end[r] + 3 < x0) {
+                    row_end[r] = x0 + w;
+                    let y = 22 + r as i32 * 15;
+                    gfx::fill(o, x0, y, w, 13, th::SPEC_BG);
+                    rrect(o, x0, y, w, 13, 4, th::PN2);
+                    text(o, &F_R11, x0 + 4, y + 10, &l.text, l.color);
+                    // Etiketten sinyale ince çizgi (adım black_box: Xtensa LLVM hatası)
+                    let stride = core::hint::black_box(W);
+                    let mut i = (y as usize + 13) * stride + x.clamp(0, W as i32 - 1) as usize;
+                    for _ in 0..4 {
+                        o.buf[i] = l.color;
+                        i += stride;
+                    }
+                }
+            }
         }
         if let Some(d) = dial {
             let s = fmt_freq(d);

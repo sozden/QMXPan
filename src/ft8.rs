@@ -22,15 +22,49 @@ pub static ON: AtomicBool = AtomicBool::new(false);
 pub static SELFTEST: AtomicBool = AtomicBool::new(false);
 /// Sonuç listesi her değiştiğinde artar (ekran yeniden çizilsin)
 pub static GEN: AtomicU32 = AtomicU32::new(0);
+/// QMX'in o anki ayar frekansı (ana döngü yazar); çözülen mesajın RF frekansı için.
+/// (Xtensa'da AtomicU64 yok; 54 MHz'e kadar u32 yeter.)
+pub static DIAL: AtomicU32 = AtomicU32::new(0);
+
+/// SNR kalibrasyonu: WSJT-X SNR'si (2500 Hz) ≈ SNR_SLOPE · sig_db + SNR_OFFSET.
+/// Gömülü test kaydındaki 13 mesajın WSJT-X değerlerine doğrusal uydurma
+/// (kalan sapma ±2.4 dB).
+pub const SNR_SLOPE: f32 = 0.743;
+pub const SNR_OFFSET: f32 = -24.4;
+
+/// Arama ayarları (en az puan, aday sayısı, LDPC turu); web'den denenebilir
+pub static PARAMS: Mutex<(i32, i32, i32)> = Mutex::new((10, 120, 20));
 
 #[derive(Clone)]
 pub struct Msg {
     /// Dilim başlangıcı "HHMMSS" (UTC) ya da "TEST"
     pub slot: String,
     pub snr: i32,
+    /// Ton gücü − gürültü tabanı (bin başına, dB; kalibrasyon için)
+    pub sig_db: f32,
     pub dt: f32,
     pub freq: f32,
     pub text: String,
+    /// Çözüm anındaki ayar frekansı (RF = dial + freq); öz testte 0
+    pub dial: u64,
+}
+
+impl Msg {
+    /// Mesajı gönderen istasyon: "CQ [DX|POTA..] ÇAĞRI [GRID]" ya da "ALICI GÖNDEREN ..."
+    pub fn sender(&self) -> Option<String> {
+        let t: Vec<&str> = self.text.split_whitespace().collect();
+        let raw = if t.first() == Some(&"CQ") {
+            match t.len() {
+                0..=1 => return None,
+                2 | 3 => t[1],
+                _ => t[2],
+            }
+        } else {
+            *t.get(1)?
+        };
+        let c = raw.trim_matches(|ch| ch == '<' || ch == '>');
+        (c.len() >= 3 && c != "...").then(|| c.to_string())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -159,8 +193,10 @@ fn collect(rx: Receiver<(Vec<f32>, f64)>, jobs: SyncSender<Job>) {
 
 fn decode(audio: &[f32], block: usize, slot: &str) {
     let t0 = Instant::now();
-    let mut res: Vec<c::ft8w_result_t> = (0..50).map(|_| unsafe { core::mem::zeroed() }).collect();
+    let mut res: Vec<c::ft8w_result_t> = (0..60).map(|_| unsafe { core::mem::zeroed() }).collect();
+    let (ms_, mc, li) = *PARAMS.lock().unwrap();
     let n = unsafe {
+        c::ft8w_set_params(ms_, mc, li);
         c::ft8w_reset();
         for b in audio.chunks_exact(block) {
             c::ft8w_process(b.as_ptr());
@@ -168,17 +204,20 @@ fn decode(audio: &[f32], block: usize, slot: &str) {
         c::ft8w_decode(res.as_mut_ptr(), res.len() as i32)
     } as usize;
     let ms = t0.elapsed().as_millis() as u32;
+    let dial = if slot == "TEST" { 0 } else { DIAL.load(Ordering::Relaxed) as u64 };
     let mut new: Vec<Msg> = res[..n]
         .iter()
         .map(|r| Msg {
             slot: slot.to_string(),
-            snr: r.snr as i32,
+            snr: (r.sig_db * SNR_SLOPE + SNR_OFFSET).round().clamp(-30.0, 40.0) as i32,
+            sig_db: r.sig_db,
             // ft8_lib zamanı dilim başına göre; WSJT-X DT'si 0.5 sn kaydırılmış
             dt: r.time_sec - 0.5,
             freq: r.freq_hz,
             text: unsafe { core::ffi::CStr::from_ptr(r.text.as_ptr()) }
                 .to_string_lossy()
                 .into_owned(),
+            dial,
         })
         .collect();
     new.sort_by(|a, b| a.freq.total_cmp(&b.freq));

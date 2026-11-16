@@ -358,14 +358,39 @@ fn http_server(nvs: std::sync::Arc<Mutex<EspNvs<NvsDefault>>>) -> Result<EspHttp
             st.decode_ms
         );
         for m in crate::ft8::MSGS.lock().unwrap().iter() {
-            out.push_str(&format!("{} {:+3} {:+4.1} {:4.0} {}\n", m.slot, m.snr, m.dt, m.freq, m.text));
+            out.push_str(&format!(
+                "{} {:+3} {:+4.1} {:4.0} {:5.1} {}\n",
+                m.slot, m.snr, m.dt, m.freq, m.sig_db, m.text
+            ));
         }
         req.into_ok_response()?.write_all(out.as_bytes())?;
         Ok(())
     })?;
 
     // Gömülü test kaydıyla FT8 çözücüyü dener (sonuç ekranda ve kayıtta)
+    // İsteğe bağlı: ?s=en_az_puan&c=aday&l=ldpc_turu (sonraki tüm çözümlere uygulanır)
     server.fn_handler("/api/ft8test", Method::Post, |req| -> Result<()> {
+        let uri = req.uri().to_string();
+        let q = |k: &str| {
+            uri.split_once('?')?
+                .1
+                .split('&')
+                .find_map(|kv| kv.strip_prefix(&format!("{k}=")))
+                .and_then(|v| v.parse::<i32>().ok())
+        };
+        {
+            let mut p = crate::ft8::PARAMS.lock().unwrap();
+            if let Some(v) = q("s") {
+                p.0 = v.clamp(1, 60);
+            }
+            if let Some(v) = q("c") {
+                p.1 = v.clamp(10, 200);
+            }
+            if let Some(v) = q("l") {
+                p.2 = v.clamp(5, 60);
+            }
+            info!("FT8 ayarları: puan {} aday {} LDPC {}", p.0, p.1, p.2);
+        }
         crate::ft8::SELFTEST.store(true, Ordering::SeqCst);
         req.into_ok_response()?.write_all(b"FT8 self-test started\n")?;
         Ok(())

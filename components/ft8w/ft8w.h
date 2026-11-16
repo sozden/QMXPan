@@ -11,9 +11,13 @@ extern "C" {
 typedef struct {
     float freq_hz;  // ses frekansı (USB'de ayar frekansının üstü)
     float time_sec; // dilim başlangıcına göre zaman kayması
-    int16_t snr;    // kaba SNR tahmini (dB)
+    int16_t snr;    // kaba SNR tahmini (aday puanından, dB)
+    float sig_db;   // mesajın 79 tonunun ortalama gücü − gürültü tabanı (bin başına, dB)
     char text[36];  // çözülen mesaj
 } ft8w_result_t;
+
+// Arama ayarları (varsayılan: en az puan 10, 120 aday, 20 LDPC turu)
+void ft8w_set_params(int min_score, int max_candidates, int ldpc_iterations);
 
 // 12 kHz ses için çözücüyü hazırlar (f_min..f_max Hz arası aranır). 0 = başarılı.
 int ft8w_init(float f_min, float f_max);

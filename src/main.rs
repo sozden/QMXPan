@@ -61,6 +61,8 @@ fn main() -> anyhow::Result<()> {
     let mut settings_open = false;
     // Şelale alanındaki panel (CW metni / FT8 listesi) ve en son çizilen içerik
     let mut panel = ui::Panel::None;
+    // FT8: 0 kapalı, 1 liste, 2 şelale + spektrum etiketleri
+    let mut ft8_mode: u8 = 0;
     let mut cw_drawn: Option<(String, cw::Stat, Option<u64>)> = None;
     let mut ft8_drawn: Option<(u32, bool)> = None;
     ft8::start();
@@ -325,31 +327,36 @@ fn main() -> anyhow::Result<()> {
                                     dsp::ZOOM.store(z, std::sync::atomic::Ordering::Relaxed);
                                     ui.set_zoom(&mut fb, z);
                                     scale_for = None;
-                                    let active: &[ui::Key] = match panel {
-                                        ui::Panel::Cw => &[ui::Key::Cw],
-                                        ui::Panel::Ft8 => &[ui::Key::Ft8],
-                                        ui::Panel::None => &[],
-                                    };
-                                    ui.draw_keys(&mut fb, active);
+                                    ui.draw_keys(&mut fb, &keys_active(panel, ft8_mode));
                                     cw_drawn = None;
                                     ft8_drawn = None;
                                 }
                                 ui::Key::Cw | ui::Key::Ft8 => {
-                                    // CW ve FT8 aynı anda açık olmaz
-                                    let want = if panel == k_panel(k) { ui::Panel::None } else { k_panel(k) };
-                                    panel = want;
-                                    cw::ON.store(want == ui::Panel::Cw, std::sync::atomic::Ordering::Relaxed);
-                                    ft8::ON.store(want == ui::Panel::Ft8, std::sync::atomic::Ordering::Relaxed);
-                                    if want == ui::Panel::Cw {
+                                    // CW ve FT8 aynı anda açık olmaz. FT8 tuşu üç durum
+                                    // arasında döner: liste → şelale + etiketler → kapalı.
+                                    let (np, nf) = match k {
+                                        ui::Key::Cw if panel == ui::Panel::Cw => (ui::Panel::None, 0),
+                                        ui::Key::Cw => (ui::Panel::Cw, 0),
+                                        _ => match ft8_mode {
+                                            0 => (ui::Panel::Ft8, 1),
+                                            1 => (ui::Panel::None, 2),
+                                            _ => (ui::Panel::None, 0),
+                                        },
+                                    };
+                                    panel = np;
+                                    ft8_mode = nf;
+                                    cw::ON.store(panel == ui::Panel::Cw, std::sync::atomic::Ordering::Relaxed);
+                                    ft8::ON.store(ft8_mode > 0, std::sync::atomic::Ordering::Relaxed);
+                                    if panel == ui::Panel::Cw {
                                         cw::TEXT.lock().unwrap().clear();
                                     }
-                                    ui.set_panel(&mut fb, want);
-                                    let active: &[ui::Key] = match want {
-                                        ui::Panel::Cw => &[ui::Key::Cw],
-                                        ui::Panel::Ft8 => &[ui::Key::Ft8],
-                                        ui::Panel::None => &[],
-                                    };
-                                    ui.draw_keys(&mut fb, active);
+                                    ui.set_panel(&mut fb, panel);
+                                    ui.set_ft8_key(match ft8_mode {
+                                        1 => "FT8 LIST",
+                                        2 => "FT8 WF",
+                                        _ => "FT8",
+                                    });
+                                    ui.draw_keys(&mut fb, &keys_active(panel, ft8_mode));
                                     cw_drawn = None;
                                     ft8_drawn = None;
                                 }
@@ -446,14 +453,36 @@ fn main() -> anyhow::Result<()> {
             }
         }
         // FT8 listesi: yeni çözüm geldiyse ya da saat durumu değiştiyse
-        if panel == ui::Panel::Ft8 && !band_popup {
+        ft8::DIAL.store(dial.unwrap_or(0) as u32, std::sync::atomic::Ordering::Relaxed);
+        if ft8_mode > 0 && !band_popup {
             let st = ft8::STATUS.lock().unwrap().clone();
             let now = (ft8::GEN.load(std::sync::atomic::Ordering::SeqCst), st.time_ok);
             if ft8_drawn != Some(now) {
                 let msgs = ft8::MSGS.lock().unwrap().clone();
-                ui.draw_ft8_panel(&mut fb, &msgs, &st, MYCALL);
+                if panel == ui::Panel::Ft8 {
+                    ui.draw_ft8_panel(&mut fb, &msgs, &st, MYCALL);
+                }
+                // Son dilimde çözülen istasyonlar spektrumda etiketlenir
+                let labels = msgs
+                    .iter()
+                    .filter(|m| m.slot == st.last_slot && m.dial != 0)
+                    .filter_map(|m| {
+                        let call = m.sender()?;
+                        let color = if m.text.contains(MYCALL) {
+                            gfx::th::AM
+                        } else if m.text.starts_with("CQ ") {
+                            gfx::th::GR
+                        } else {
+                            gfx::th::TX
+                        };
+                        Some(ui::Label { rf: m.dial + m.freq as u64, text: call, color })
+                    })
+                    .collect();
+                ui.set_labels(labels);
                 ft8_drawn = Some(now);
             }
+        } else if ft8_mode == 0 {
+            ui.set_labels(Vec::new());
         }
         if settings_dirty.is_some_and(|t| t.elapsed() >= Duration::from_secs(2)) {
             set_store.save(&ui.settings());
@@ -538,12 +567,16 @@ fn main() -> anyhow::Result<()> {
 /// FT8 listesinde vurgulanan çağrı işareti
 const MYCALL: &str = "TA4SO";
 
-fn k_panel(k: ui::Key) -> ui::Panel {
-    match k {
-        ui::Key::Cw => ui::Panel::Cw,
-        ui::Key::Ft8 => ui::Panel::Ft8,
-        _ => ui::Panel::None,
+/// Tuş çubuğunda açık (camgöbeği) gösterilecek tuşlar
+fn keys_active(panel: ui::Panel, ft8_mode: u8) -> Vec<ui::Key> {
+    let mut v = Vec::new();
+    if panel == ui::Panel::Cw {
+        v.push(ui::Key::Cw);
     }
+    if ft8_mode > 0 {
+        v.push(ui::Key::Ft8);
+    }
+    v
 }
 
 /// Tanı için: spektrumdaki en güçlü 8 tepeyi mutlak frekans ve LO'ya göre

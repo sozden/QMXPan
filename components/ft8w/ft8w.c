@@ -6,14 +6,63 @@
 #include <string.h>
 #include <stdio.h>
 
+#include <math.h>
+
 #include <ft8/decode.h>
+#include <ft8/encode.h>
 #include <ft8/message.h>
 #include <common/monitor.h>
 
-#define MIN_SCORE 10
-#define MAX_CANDIDATES 120
-#define LDPC_ITERATIONS 20
-#define MAX_DECODED 50
+#define MAX_CANDIDATES_CAP 200
+#define MAX_DECODED 60
+
+static int s_min_score = 10;
+static int s_max_cands = 120;
+static int s_ldpc_iters = 20;
+
+void ft8w_set_params(int min_score, int max_candidates, int ldpc_iterations)
+{
+    s_min_score = min_score;
+    s_max_cands = max_candidates > MAX_CANDIDATES_CAP ? MAX_CANDIDATES_CAP : max_candidates;
+    s_ldpc_iters = ldpc_iterations;
+}
+
+// Şelalenin ortanca değeri (dB): gürültü tabanı
+static float waterfall_median_db(const ftx_waterfall_t* wf)
+{
+    static uint32_t hist[256];
+    memset(hist, 0, sizeof(hist));
+    size_t n = (size_t)wf->num_blocks * wf->block_stride;
+    for (size_t i = 0; i < n; ++i) hist[wf->mag[i]]++;
+    size_t half = n / 2, acc = 0;
+    for (int v = 0; v < 256; ++v) {
+        acc += hist[v];
+        if (acc >= half) return (v - 240) * 0.5f;
+    }
+    return -120.0f;
+}
+
+// Çözülen mesajı yeniden kodlayıp 79 sembolün ton gücünü şelaleden okur;
+// ortalama gücün gürültü tabanına oranını (bin başına, dB) döndürür.
+static float message_power_db(const ftx_waterfall_t* wf, const ftx_candidate_t* cand, const ftx_message_t* msg, float noise_db)
+{
+    uint8_t tones[FT8_NN];
+    ft8_encode(msg->payload, tones);
+    float sum = 0.0f;
+    int n = 0;
+    for (int i = 0; i < FT8_NN; ++i) {
+        int block = cand->time_offset + i;
+        int bin = cand->freq_offset + tones[i];
+        if (block < 0 || block >= wf->num_blocks || bin < 0 || bin >= wf->num_bins) continue;
+        int off = block * wf->block_stride + cand->time_sub * wf->freq_osr * wf->num_bins
+                + cand->freq_sub * wf->num_bins + bin;
+        float db = (wf->mag[off] - 240) * 0.5f;
+        sum += powf(10.0f, db / 10.0f);
+        n++;
+    }
+    if (n == 0) return 0.0f;
+    return 10.0f * log10f(sum / n) - noise_db;
+}
 
 static monitor_t s_mon;
 static bool s_ready = false;
@@ -114,7 +163,7 @@ void ft8w_process(const float* block)
 int ft8w_num_blocks(void) { return s_ready ? s_mon.wf.num_blocks : 0; }
 
 // Büyük diziler yığında değil (görev yığını sınırlı)
-static ftx_candidate_t s_cands[MAX_CANDIDATES];
+static ftx_candidate_t s_cands[MAX_CANDIDATES_CAP];
 static ftx_message_t s_decoded[MAX_DECODED];
 static ftx_message_t* s_decoded_ht[MAX_DECODED];
 
@@ -122,7 +171,8 @@ int ft8w_decode(ft8w_result_t* out, int max)
 {
     if (!s_ready) return 0;
     const ftx_waterfall_t* wf = &s_mon.wf;
-    int num_cands = ftx_find_candidates(wf, MAX_CANDIDATES, s_cands, MIN_SCORE);
+    float noise_db = waterfall_median_db(wf);
+    int num_cands = ftx_find_candidates(wf, s_max_cands, s_cands, s_min_score);
     for (int i = 0; i < MAX_DECODED; ++i) s_decoded_ht[i] = NULL;
 
     int n_out = 0;
@@ -130,7 +180,7 @@ int ft8w_decode(ft8w_result_t* out, int max)
         const ftx_candidate_t* cand = &s_cands[idx];
         ftx_message_t msg;
         ftx_decode_status_t status;
-        if (!ftx_decode_candidate(wf, cand, LDPC_ITERATIONS, &msg, &status)) continue;
+        if (!ftx_decode_candidate(wf, cand, s_ldpc_iters, &msg, &status)) continue;
 
         // Aynı mesaj birden fazla adayda çözülmüş olabilir
         int h = msg.hash % MAX_DECODED;
@@ -156,6 +206,7 @@ int ft8w_decode(ft8w_result_t* out, int max)
         r->time_sec = (cand->time_offset + (float)cand->time_sub / wf->time_osr) * s_mon.symbol_period;
         // ft8_lib'in demosundaki gibi kaba tahmin (WSJT-X SNR'si değil)
         r->snr = (int16_t)(cand->score * 0.5f - 22.0f);
+        r->sig_db = message_power_db(wf, cand, &msg, noise_db);
     }
     hash_cleanup(10);
     return n_out;
