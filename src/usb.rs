@@ -319,7 +319,12 @@ fn reader(h: usize, ch: usize, sub: usize, stop: Arc<AtomicBool>, stats: Arc<Mut
     let (mut n, mut si, mut sq, mut siq) = (0u64, 0f64, 0f64, 0f64);
     let mut t0 = Instant::now();
     let mut an = crate::dsp::Analyzer::new();
+    // CW: ayar frekansındaki sinyal → 700 Hz ton, 6 kHz (±900 Hz pencere)
+    let mut cw_demod = crate::audio::Demod::new(12_000.0, 900.0, 8, 700.0, 100.0);
+    let mut cw_dec = crate::cw::Decoder::new(700.0, true, 5);
+    let mut cw_t = Instant::now();
     while !stop.load(Ordering::SeqCst) {
+        let cw_on = crate::cw::ON.load(Ordering::Relaxed);
         let mut got: u32 = 0;
         let r = unsafe {
             x::uac_host_device_read(
@@ -337,10 +342,35 @@ fn reader(h: usize, ch: usize, sub: usize, stop: Arc<AtomicBool>, stats: Arc<Mut
             let i = sample(&f[..sub], sub) as f64;
             let q = if ch > 1 { sample(&f[sub..2 * sub], sub) as f64 } else { 0.0 };
             an.push(i as f32, q as f32);
+            if cw_on {
+                if let Some(a) = cw_demod.push(i as f32, q as f32) {
+                    cw_dec.push(a);
+                }
+            }
             si += i * i;
             sq += q * q;
             siq += i * q;
             n += 1;
+        }
+        // CW çözücü çıktısını ve durumunu ~10 kez/s paylaş
+        if cw_on && cw_t.elapsed() >= Duration::from_millis(100) {
+            cw_t = Instant::now();
+            if !cw_dec.out.is_empty() {
+                let mut t = crate::cw::TEXT.lock().unwrap();
+                t.push_str(&cw_dec.out);
+                if t.len() > 400 {
+                    let cut = t.len() - 300;
+                    let cut = (cut..t.len()).find(|&i| t.is_char_boundary(i)).unwrap_or(t.len());
+                    t.drain(..cut);
+                }
+                cw_dec.out.clear();
+            }
+            *crate::cw::STAT.lock().unwrap() = crate::cw::Stat {
+                wpm: cw_dec.wpm().round() as u32,
+                tone_hz: cw_dec.freq.round() as u32,
+                snr_db: cw_dec.snr_db.max(0.0).round() as u32,
+                key: cw_dec.tone(),
+            };
         }
         let dt = t0.elapsed().as_secs_f32();
         if dt >= 1.0 {

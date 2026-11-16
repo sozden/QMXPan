@@ -59,20 +59,24 @@ pub const MODES: [&str; 4] = ["LSB", "USB", "CW", "DIGI"];
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Key {
     Band,
-    Zoom,
+    Cw,
+    Ft8,
     Display,
-    Mem,
     Wifi,
     Menu,
 }
+/// (tuş, yazı, etkin mi)
 const KEYS: [(Key, &str, bool); 6] = [
     (Key::Band, "BAND", true),
-    (Key::Zoom, "ZOOM", false),
+    (Key::Cw, "CW", true),
+    (Key::Ft8, "FT8", false),
     (Key::Display, "DISPLAY", true),
-    (Key::Mem, "MEM", false),
     (Key::Wifi, "WIFI", false),
     (Key::Menu, "MENU", false),
 ];
+
+/// Şelalenin altındaki metin paneli (CW / FT8) yüksekliği
+const PANEL_H: usize = 52;
 
 fn key_x(i: usize) -> i32 {
     8 + (i as i32 * 263) / 2
@@ -240,6 +244,8 @@ pub struct Ui {
     layers_for: Option<(i32, Option<(usize, usize)>, i32)>,
     over_for: Option<u64>,
     last: Hdr,
+    /// Şelalenin o anki yüksekliği (metin paneli açıksa kısalır)
+    wf_h: usize,
     /// CAL ofseti (dB): ızgara etiketleri dBm gösterir
     pub cal: f32,
     t_spec_us: u64,
@@ -276,13 +282,14 @@ impl Ui {
             layers_for: None,
             over_for: None,
             last: Hdr::default(),
+            wf_h: WF_H,
             cal: 0.0,
             t_spec_us: 0,
             t_wf_us: 0,
             wf_lines: 0,
         };
         gfx::fill(fb, 0, WF_Y as i32, W as i32, WF_H as i32, 0);
-        ui.draw_keys(fb);
+        ui.draw_keys(fb, &[]);
         ui.draw_topbar(fb, "", false, "");
         ui.draw_freq(fb, None);
         ui.draw_band_card(fb, None);
@@ -425,13 +432,61 @@ impl Ui {
         }
     }
 
-    fn draw_keys(&self, fb: &mut Framebuffer) {
+    /// Tuş çubuğu; `active` içindeki tuşlar camgöbeği (açık) gösterilir.
+    pub fn draw_keys(&self, fb: &mut Framebuffer, active: &[Key]) {
         gfx::fill(fb, 0, KEY_Y - 4, W as i32, 480 - KEY_Y + 4, th::BG);
-        for (i, (_, label, enabled)) in KEYS.iter().enumerate() {
+        for (i, (k, label, enabled)) in KEYS.iter().enumerate() {
             let x = key_x(i);
-            rrect(fb, x, KEY_Y, 125, KEY_H, 7, if *enabled { th::PN2 } else { th::PN });
-            text_c(fb, &F_B14, x + 62, KEY_Y + 20, label, if *enabled { th::TX } else { th::LN });
+            let on = active.contains(k);
+            let (bg, fg) = match (enabled, on) {
+                (true, true) => (th::CY, th::ON_CY),
+                (true, false) => (th::PN2, th::TX),
+                _ => (th::PN, th::LN),
+            };
+            rrect(fb, x, KEY_Y, 125, KEY_H, 7, bg);
+            text_c(fb, &F_B14, x + 62, KEY_Y + 20, label, fg);
         }
+    }
+
+    /// Şelalenin altında metin panelini açar/kapatır (şelale o kadar kısalır).
+    pub fn set_text_panel(&mut self, fb: &mut Framebuffer, on: bool) {
+        let h = if on { WF_H - PANEL_H } else { WF_H };
+        if h != self.wf_h {
+            self.wf_h = h;
+            gfx::fill(fb, 0, (WF_Y + h) as i32, W as i32, (WF_H - h) as i32, if on { th::BG } else { 0 });
+        }
+    }
+
+    /// CW paneli: durum satırı ve çözülen metnin son kısmı (sağdan akar).
+    pub fn draw_cw_panel(&self, fb: &mut Framebuffer, txt: &str, st: &crate::cw::Stat, dial: Option<u64>) {
+        let y = (WF_Y + WF_H - PANEL_H) as i32 + 2;
+        let h = PANEL_H as i32 - 4;
+        gfx::fill(fb, 0, y - 2, W as i32, h + 4, th::BG);
+        rrect(fb, 4, y, W as i32 - 8, h, 8, th::PN);
+        // Sol: CW rozeti, ton ışığı ve hız
+        rrect(fb, 12, y + 7, 38, 18, 9, th::CY);
+        text_c(fb, &F_B12, 31, y + 20, "CW", th::ON_CY);
+        rrect(fb, 58, y + 11, 10, 10, 5, if st.key { th::GR } else { th::LN });
+        let info = if st.wpm > 0 {
+            let rx = dial.map(|d| d as i64 + st.tone_hz as i64 - 700);
+            match rx {
+                Some(f) => format!("{} WPM · {} dB · {}", st.wpm, st.snr_db, fmt_freq(f as u64)),
+                None => format!("{} WPM · {} dB", st.wpm, st.snr_db),
+            }
+        } else {
+            "listening...".to_string()
+        };
+        text(fb, &F_R11, 12, y + 41, &info, th::MU);
+        // Metin: son kısmı, en fazla panel genişliği kadar
+        let maxw = W as i32 - 8 - 260;
+        let mut start = txt.len();
+        for (i, _) in txt.char_indices().rev() {
+            if gfx::text_w(&F_B16, &txt[i..]) > maxw {
+                break;
+            }
+            start = i;
+        }
+        text_r(fb, &F_B16, W as i32 - 18, y + 30, &txt[start..], th::TX);
     }
 
     // ------------------------------------------------------------- ölçek
@@ -497,7 +552,7 @@ impl Ui {
 
     /// Şelaleyi tamamen siler (band değişince eski bandın izleri kalmasın).
     pub fn clear_waterfall(&mut self, fb: &mut Framebuffer) {
-        fb.buf[WF_Y * W..(WF_Y + WF_H) * W].fill(0);
+        fb.buf[WF_Y * W..(WF_Y + self.wf_h) * W].fill(0);
         self.wf_dial = None;
     }
 
@@ -781,7 +836,7 @@ impl Ui {
             (Some(d), Some(old)) => {
                 let shift = (old as i64 - d as i64) / HZ_PER_PX;
                 if shift != 0 {
-                    shift_rows(fb, shift);
+                    shift_rows(fb, shift, self.wf_h);
                     self.wf_dial = Some((old as i64 - shift * HZ_PER_PX) as u64);
                 }
             }
@@ -789,7 +844,7 @@ impl Ui {
             (None, _) => {}
         }
         let start = WF_Y * W;
-        let end = (WF_Y + WF_H - 1) * W;
+        let end = (WF_Y + self.wf_h - 1) * W;
         fb.buf.copy_within(start..end, start + W);
         let lo = self.floor - 3.0 - self.set.wf_bright as f32;
         let span = self.set.wf_span as f32;
@@ -805,9 +860,9 @@ impl Ui {
 }
 
 /// Şelaleyi yatayda `shift` piksel kaydırır (+ sağa), açılan yeri siyah yapar.
-fn shift_rows(fb: &mut Framebuffer, shift: i64) {
+fn shift_rows(fb: &mut Framebuffer, shift: i64, h: usize) {
     let s = shift.unsigned_abs() as usize;
-    for y in WF_Y..WF_Y + WF_H {
+    for y in WF_Y..WF_Y + h {
         let row = &mut fb.buf[y * W..(y + 1) * W];
         if s >= W {
             row.fill(0);
