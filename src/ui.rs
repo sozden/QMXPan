@@ -71,6 +71,118 @@ const MODE_X: i32 = 230;
 const MODE_W: i32 = 60;
 const MODE_GAP: i32 = 6;
 
+/// S birimi: S9 = -73 dBm, S birimi başına 6 dB (S1 = -121 dBm)
+pub fn s_units(dbm: f32) -> String {
+    if dbm > -73.0 {
+        format!("S9+{:.0}", dbm + 73.0)
+    } else {
+        let s = (9.0 + (dbm + 73.0) / 6.0).floor().max(0.0);
+        format!("S{s:.0}")
+    }
+}
+
+const SM_X: i32 = 500;
+const SM_W: i32 = 120;
+
+/// Üst şeritte S-metre: yazı + çubuk (S1..S9 yeşil, S9 üstü kırmızı, S9+40'a kadar)
+fn draw_smeter(fb: &mut Framebuffer, dbm: f32) {
+    let s = s_units(dbm);
+    let _ = Text::new(
+        &s,
+        Point::new(SM_X, 20),
+        MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
+    )
+    .draw(fb);
+    let _ = Text::new(
+        &format!("{dbm:.0} dBm"),
+        Point::new(SM_X + 64, 18),
+        MonoTextStyle::new(&FONT_6X10, Rgb565::CSS_LIGHT_GRAY),
+    )
+    .draw(fb);
+    let (lo, hi) = (-121.0f32, -33.0f32);
+    let s9_px = ((-73.0 - lo) / (hi - lo) * SM_W as f32) as i32;
+    let v = (((dbm - lo) / (hi - lo)).clamp(0.0, 1.0) * SM_W as f32) as i32;
+    let y = 28;
+    fill(fb, SM_X as usize, y, SM_W as usize, 8, Rgb565::new(4, 8, 6));
+    fill(fb, SM_X as usize, y, v.min(s9_px) as usize, 8, Rgb565::GREEN);
+    if v > s9_px {
+        fill(fb, (SM_X + s9_px) as usize, y, (v - s9_px) as usize, 8, Rgb565::RED);
+    }
+    // S1, S3, S5, S7, S9, +20, +40 çentikleri
+    for t in [-121.0f32, -109.0, -97.0, -85.0, -73.0, -53.0, -33.0] {
+        let x = SM_X + ((t - lo) / (hi - lo) * (SM_W - 1) as f32) as i32;
+        for yy in y + 8..y + 11 {
+            fb.put(x as usize, yy as usize, Rgb565::CSS_LIGHT_GRAY);
+        }
+    }
+}
+
+/// Frekans yazısına dokunuldu mu (band penceresini açar)
+pub fn freq_area_at(x: i32, y: i32) -> bool {
+    x < MODE_X - 10 && (y as usize) < HDR_H
+}
+
+// ---------------------------------------------------------- band penceresi
+
+const BP_X: i32 = 20;
+const BP_Y: i32 = WF_Y as i32 + 20;
+const BP_W: i32 = 760;
+const BP_H: i32 = 200;
+const BB_W: i32 = 110;
+const BB_H: i32 = 64;
+const BB_GAP: i32 = 12;
+const BB_COLS: usize = 6;
+
+fn band_button_rect(i: usize) -> (i32, i32) {
+    let col = (i % BB_COLS) as i32;
+    let row = (i / BB_COLS) as i32;
+    (
+        BP_X + 14 + col * (BB_W + BB_GAP),
+        BP_Y + 44 + row * (BB_H + BB_GAP),
+    )
+}
+
+/// Band seçim penceresini şelalenin üstüne çizer.
+pub fn draw_band_popup(fb: &mut Framebuffer, current: Option<usize>) {
+    fill(fb, BP_X as usize, BP_Y as usize, BP_W as usize, BP_H as usize, Rgb565::new(3, 6, 5));
+    let _ = Rectangle::new(Point::new(BP_X, BP_Y), Size::new(BP_W as u32, BP_H as u32))
+        .into_styled(PrimitiveStyle::with_stroke(Rgb565::CYAN, 2))
+        .draw(fb);
+    text(fb, "Band (m)", BP_X + 14, BP_Y + 28, Rgb565::WHITE);
+    text(fb, "tap outside to close", BP_X + BP_W - 214, BP_Y + 28, Rgb565::CSS_GRAY);
+    for (i, b) in crate::bands::BANDS.iter().enumerate() {
+        let (x, y) = band_button_rect(i);
+        let r = Rectangle::new(Point::new(x, y), Size::new(BB_W as u32, BB_H as u32));
+        let sel = current == Some(i);
+        if sel {
+            let _ = r.into_styled(PrimitiveStyle::with_fill(Rgb565::CYAN)).draw(fb);
+        } else {
+            let _ = r
+                .into_styled(PrimitiveStyle::with_stroke(Rgb565::new(10, 30, 20), 2))
+                .draw(fb);
+        }
+        let tx = x + (BB_W - b.name.len() as i32 * 10) / 2;
+        text(fb, b.name, tx, y + 40, if sel { Rgb565::BLACK } else { Rgb565::WHITE });
+    }
+}
+
+/// Band penceresinde dokunulan yer: Some(Some(i)) düğme, Some(None) pencere içi boşluk,
+/// None pencere dışı.
+pub fn band_popup_hit(x: i32, y: i32) -> Option<Option<usize>> {
+    if x < BP_X || x >= BP_X + BP_W || y < BP_Y || y >= BP_Y + BP_H {
+        return None;
+    }
+    Some((0..crate::bands::BANDS.len()).find(|&i| {
+        let (bx, by) = band_button_rect(i);
+        x >= bx && x < bx + BB_W && y >= by && y < by + BB_H
+    }))
+}
+
+/// Pencere kapanınca altında kalan şelale bölgesini siyaha boyar.
+pub fn clear_band_popup(fb: &mut Framebuffer) {
+    fill(fb, BP_X as usize, BP_Y as usize, BP_W as usize, BP_H as usize, Rgb565::BLACK);
+}
+
 /// Üst şeritte dokunulan nokta bir mod düğmesiyse onu döndürür.
 pub fn mode_button_at(x: i32, y: i32) -> Option<&'static str> {
     if !(4..=40).contains(&y) {
@@ -174,6 +286,7 @@ impl Ui {
         status: &str,
         ok: bool,
         net: &str,
+        smeter_dbm: Option<f32>,
     ) {
         fill(fb, 0, 0, W, HDR_H, Rgb565::new(2, 4, 3));
         for (i, m) in MODES.iter().enumerate() {
@@ -206,6 +319,9 @@ impl Ui {
         if !MODES.contains(&mode) && !mode.is_empty() {
             let x = MODE_X + MODES.len() as i32 * (MODE_W + MODE_GAP);
             text(fb, mode, x, 28, Rgb565::CYAN);
+        }
+        if let Some(dbm) = smeter_dbm {
+            draw_smeter(fb, dbm);
         }
         let c = if ok { Rgb565::GREEN } else { Rgb565::CSS_ORANGE };
         let x = W as i32 - 14 - status.len() as i32 * 10;
@@ -249,6 +365,11 @@ impl Ui {
                 fb.put((DIAL_X + dx) as usize, SCALE_Y + dy, Rgb565::RED);
             }
         }
+    }
+
+    /// Bir sonraki karede spektrumun tamamını yeniden çizdirir.
+    pub fn redraw_all(&mut self) {
+        self.full_redraw = true;
     }
 
     /// Sürükleme imlecini taşır/kaldırır (eski ve yeni sütun yeniden çizilir).

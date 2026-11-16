@@ -24,6 +24,14 @@ pub static SPECTRUM: Mutex<Spectrum> = Mutex::new(Spectrum {
     db: Vec::new(),
 });
 
+/// LO'ya göre [lo_hz, hi_hz] aralığındaki en güçlü bin'in dBFS değeri.
+pub fn peak_in(db: &[f32], lo_hz: i64, hi_hz: i64) -> f32 {
+    let bin_hz = 48_000.0 / N as f32;
+    let k = |hz: i64| ((N as f32 / 2.0 + hz as f32 / bin_hz).round() as isize).clamp(0, N as isize - 1) as usize;
+    let (a, b) = (k(lo_hz.min(hi_hz)), k(lo_hz.max(hi_hz)));
+    db[a..=b].iter().cloned().fold(f32::MIN, f32::max)
+}
+
 pub struct Analyzer {
     win: Vec<f32>,
     norm: f32,

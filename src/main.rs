@@ -4,6 +4,7 @@
 //! çizer. CAT ile frekans/mod okunur; spektruma ya da şelaleye dokunmak
 //! QMX'i o frekansa ayarlar.
 
+mod bands;
 mod board;
 mod dsp;
 mod lcd;
@@ -41,12 +42,17 @@ fn main() -> anyhow::Result<()> {
     let mut fb = lcd::init()?;
     let mut ui = ui::Ui::new(&mut fb);
 
+    let nvs_part = esp_idf_svc::nvs::EspDefaultNvsPartition::take()?;
+    let band_mem = bands::Memory::new(nvs_part.clone());
     net::start(
         p.modem,
         esp_idf_svc::eventloop::EspSystemEventLoop::take()?,
-        esp_idf_svc::nvs::EspDefaultNvsPartition::take()?,
+        nvs_part,
     );
     let mut marked_valid = false;
+    let mut band_popup = false;
+    // S-metre (dBFS, geçiş bandındaki en güçlü bin; hızlı yükselir, yavaş düşer)
+    let mut smeter: Option<f32> = None;
 
     let events = usb::start()?;
     let stats = Arc::new(Mutex::new(IqStats::default()));
@@ -73,6 +79,7 @@ fn main() -> anyhow::Result<()> {
     let mut hold_dial_until = Instant::now();
     let mut hold_mode_until = Instant::now();
     let mut fw: Option<u32> = None;
+    let mut last_fw_raw: Option<String> = None;
     let mut last_q9_fix = Instant::now() - Duration::from_secs(10);
 
     // Başarım ölçümü
@@ -180,13 +187,47 @@ fn main() -> anyhow::Result<()> {
                     mode = mode_name(&m).to_string();
                 }
             }
-            fw = cat_value("FW").and_then(|v| v.trim().parse::<u32>().ok());
+            let fw_raw = cat_value("FW");
+            if fw_raw != last_fw_raw {
+                info!("QMX FW yanıtı: {:?}", fw_raw);
+                last_fw_raw = fw_raw.clone();
+            }
+            fw = fw_raw.and_then(|v| v.trim().parse::<u32>().ok()).filter(|&w| (50..=10_000).contains(&w));
         }
         ui.set_passband(ui::passband(&mode, fw));
 
-        // Dokunma: üst şeritte mod düğmeleri; spektrum/şelalede sürükleyip bırakınca ayar
+        // Dokunma: üst şeritte mod düğmeleri ve frekans (band penceresi);
+        // spektrum/şelalede sürükleyip bırakınca ayar
         if let Some(t) = tp.as_mut() {
             match t.poll(&mut i2c) {
+                Some(Some((x, y))) if band_popup => {
+                    if !pressed {
+                        match ui::band_popup_hit(x as i32, y as i32) {
+                            Some(Some(i)) => {
+                                if let (Some(c), Some(d)) = (cat.as_ref(), dial) {
+                                    // Ayrılan bandın frekansını hatırla
+                                    if let Some(cur) = bands::band_of(d) {
+                                        band_mem.set(cur, d);
+                                    }
+                                    let f = band_mem.get(i);
+                                    info!("Band {} m: {}", bands::BANDS[i].name, ui::fmt_freq(f));
+                                    usb::CAT_RX.lock().unwrap().clear();
+                                    let _ = c.send(&format!("FA{f:011};"));
+                                    dial = Some(f);
+                                    hold_dial_until = Instant::now() + Duration::from_millis(900);
+                                }
+                                band_popup = false;
+                            }
+                            Some(None) => {}
+                            None => band_popup = false,
+                        }
+                        if !band_popup {
+                            ui::clear_band_popup(&mut fb);
+                            ui.redraw_all();
+                        }
+                    }
+                    pressed = true;
+                }
                 Some(Some((x, y))) => {
                     if (y as usize) >= ui::SPEC_Y {
                         if dial.is_some() {
@@ -210,6 +251,9 @@ fn main() -> anyhow::Result<()> {
                             fw = None;
                             hold_mode_until = Instant::now() + Duration::from_millis(800);
                             last_hdr = Instant::now() - Duration::from_secs(1);
+                        } else if ui::freq_area_at(x as i32, y as i32) && dial.is_some() {
+                            band_popup = true;
+                            ui::draw_band_popup(&mut fb, dial.and_then(bands::band_of));
                         }
                     }
                     pressed = true;
@@ -248,10 +292,24 @@ fn main() -> anyhow::Result<()> {
                 last_peaks = Instant::now();
                 log_peaks(&db, dial);
             }
-            let t0 = Instant::now();
-            ui.frame(&mut fb, &mut db, dial);
-            draw_us += t0.elapsed().as_micros() as u64;
-            frames += 1;
+            // S-metre: geçiş bandındaki en güçlü bin (SSB/DIGI varsayılanı 2.7 kHz)
+            let (a, b) = ui::passband(&mode, fw).unwrap_or((0, 2700));
+            let p = dsp::peak_in(&db, ui::LO_OFFSET + a, ui::LO_OFFSET + b);
+            let v = match smeter {
+                Some(s) if p < s => s + (p - s) * 0.15, // yavaş düşüş
+                _ => p,                                 // anında yükseliş
+            };
+            smeter = Some(v);
+            net::SMETER_DBFS_TENTHS
+                .store((v * 10.0) as i32, std::sync::atomic::Ordering::Relaxed);
+
+            // Band penceresi açıkken spektrum/şelale çizilmez (pencereyi bozmasın)
+            if !band_popup {
+                let t0 = Instant::now();
+                ui.frame(&mut fb, &mut db, dial);
+                draw_us += t0.elapsed().as_micros() as u64;
+                frames += 1;
+            }
         }
 
         if scale_for != Some(dial) {
@@ -259,7 +317,7 @@ fn main() -> anyhow::Result<()> {
             scale_for = Some(dial);
         }
 
-        if last_hdr.elapsed() >= Duration::from_millis(300) {
+        if last_hdr.elapsed() >= Duration::from_millis(200) {
             last_hdr = Instant::now();
             let s = stats.lock().unwrap().clone();
             if cat.is_none() {
@@ -287,7 +345,9 @@ fn main() -> anyhow::Result<()> {
                 net::Mode::Connecting => format!("WiFi {}...", st.ssid),
                 net::Mode::Off => String::new(),
             };
-            ui.header(&mut fb, dial, &mode, &status, ok, &net_line);
+            let cal = net::CAL_TENTHS.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
+            let sm = if ok && s.running && iq_on { smeter.map(|v| v + cal) } else { None };
+            ui.header(&mut fb, dial, &mode, &status, ok, &net_line, sm);
         }
 
         if perf_t.elapsed() >= Duration::from_secs(10) {

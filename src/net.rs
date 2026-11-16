@@ -6,7 +6,7 @@
 //! - POST /api/ota: `espflash save-image` ile üretilen .bin yüklenir, bitince
 //!   ana döngüden QMX bağlantısı düzgünce kapatılıp kart yeniden başlatılır.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -54,6 +54,12 @@ pub static OTA: AtomicU8 = AtomicU8::new(0);
 /// Ana döngüye "QMX'i bırak ve yeniden başlat" isteği
 pub static RESTART: AtomicBool = AtomicBool::new(false);
 
+/// S-metre kalibrasyonu: dBm = dBFS + CAL (onda bir dB). Varsayılan -2.0 dB,
+/// orijinal projenin "kukla yükte gürültü tabanı ≈ -130 dBm" ölçüsüne göre kaba tahmin.
+pub static CAL_TENTHS: AtomicI32 = AtomicI32::new(-20);
+/// Ana döngünün ölçtüğü son S-metre değeri (dBFS, onda bir dB); kalibrasyonda kullanılır
+pub static SMETER_DBFS_TENTHS: AtomicI32 = AtomicI32::new(i32::MIN);
+
 fn set_status(mode: Mode, ssid: &str, ip: &str) {
     *STATUS.lock().unwrap() = Status {
         mode,
@@ -88,6 +94,10 @@ fn load_creds(nvs: &EspNvs<NvsDefault>) -> Option<(String, String)> {
 fn run(modem: Modem<'static>, sysloop: EspSystemEventLoop, part: EspDefaultNvsPartition) -> Result<()> {
     let nvs = EspNvs::new(part.clone(), NS, true)?;
     let creds = load_creds(&nvs);
+    if let Ok(Some(c)) = nvs.get_i32("cal") {
+        CAL_TENTHS.store(c, Ordering::Relaxed);
+        info!("S-metre kalibrasyonu: {:+.1} dB", c as f32 / 10.0);
+    }
     let nvs = std::sync::Arc::new(Mutex::new(nvs));
 
     let mut wifi = BlockingWifi::wrap(EspWifi::new(modem, sysloop.clone(), Some(part))?, sysloop)?;
@@ -178,10 +188,24 @@ fn index_page() -> String {
 <input name=ssid placeholder='Network name (SSID)' required>\
 <input name=pass type=password placeholder='Password'>\
 <button>Save and connect</button></form>\
+<h2>S-meter calibration</h2><p>Now reading: {now}<br>Offset: {cal:+.1} dB</p>\
+<p>Feed a signal of known level into the QMX, tune it into the passband, \
+then enter its level:</p><form method=post action=/cal>\
+<input name=dbm type=number step=0.1 placeholder='Signal level in dBm, e.g. -73'>\
+<button>Calibrate</button></form>\
 <p>Firmware update: <code>tools\\ota.ps1 -Kart {ip}</code></p></body></html>",
         ver = env!("CARGO_PKG_VERSION"),
         ip = if st.ip.is_empty() { "IP" } else { &st.ip },
+        now = now_dbm()
+            .map(|d| format!("{d:.1} dBm ({})", crate::ui::s_units(d)))
+            .unwrap_or_else(|| "-".into()),
+        cal = CAL_TENTHS.load(Ordering::Relaxed) as f32 / 10.0,
     )
+}
+
+fn now_dbm() -> Option<f32> {
+    let v = SMETER_DBFS_TENTHS.load(Ordering::Relaxed);
+    (v != i32::MIN).then(|| (v + CAL_TENTHS.load(Ordering::Relaxed)) as f32 / 10.0)
 }
 
 fn html_escape(s: &str) -> String {
@@ -248,7 +272,9 @@ fn http_server(nvs: std::sync::Arc<Mutex<EspNvs<NvsDefault>>>) -> Result<EspHttp
         Ok(())
     })?;
 
+    let nvs_w = nvs.clone();
     server.fn_handler("/wifi", Method::Post, move |mut req| -> Result<()> {
+        let nvs = &nvs_w;
         let body = read_body(&mut req, 1024)?;
         let body = String::from_utf8_lossy(&body);
         let ssid = form_value(&body, "ssid").unwrap_or_default();
@@ -274,6 +300,33 @@ fn http_server(nvs: std::sync::Arc<Mutex<EspNvs<NvsDefault>>>) -> Result<EspHttp
         RESTART.store(true, Ordering::SeqCst);
         Ok(())
     })?;
+
+    {
+        let nvs = nvs.clone();
+        server.fn_handler("/cal", Method::Post, move |mut req| -> Result<()> {
+            let body = read_body(&mut req, 256)?;
+            let body = String::from_utf8_lossy(&body);
+            let dbm = form_value(&body, "dbm").and_then(|v| v.trim().parse::<f32>().ok());
+            let meas = SMETER_DBFS_TENTHS.load(Ordering::Relaxed);
+            let (Some(dbm), true) = (dbm, meas != i32::MIN) else {
+                req.into_status_response(400)?
+                    .write_all(b"need a dBm value and a running I/Q stream\n")?;
+                return Ok(());
+            };
+            let cal = (dbm * 10.0).round() as i32 - meas;
+            CAL_TENTHS.store(cal, Ordering::Relaxed);
+            nvs.lock().unwrap().set_i32("cal", cal)?;
+            info!("S-metre kalibre edildi: {dbm} dBm, ofset {:+.1} dB", cal as f32 / 10.0);
+            req.into_ok_response()?.write_all(
+                format!(
+                    "{PAGE_HEAD}<p>Calibrated: offset {:+.1} dB.</p><p><a href=/>Back</a></p></body></html>",
+                    cal as f32 / 10.0
+                )
+                .as_bytes(),
+            )?;
+            Ok(())
+        })?;
+    }
 
     server.fn_handler("/api/restart", Method::Post, |req| -> Result<()> {
         req.into_ok_response()?.write_all(b"restarting\n")?;
