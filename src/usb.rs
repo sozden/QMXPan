@@ -319,6 +319,9 @@ fn reader(h: usize, ch: usize, sub: usize, stop: Arc<AtomicBool>, stats: Arc<Mut
     let (mut n, mut si, mut sq, mut siq) = (0u64, 0f64, 0f64, 0f64);
     let mut t0 = Instant::now();
     let mut an = crate::dsp::Analyzer::new();
+    // Büyütme: ayar frekansı (LO + 12 kHz) 0 Hz'e indirilip seyreltilir
+    let mut zoom = 1u32;
+    let mut zdec: Option<crate::audio::Decim> = None;
     // CW: ayar frekansındaki sinyal → 700 Hz ton, 6 kHz (±900 Hz pencere)
     let mut cw_demod = crate::audio::Demod::new(12_000.0, 900.0, 8, 700.0, 100.0);
     // Susturma 6 (~13 dB): bant gürültüsü ve parazitten sahte E/I/T daha az çıksın
@@ -330,6 +333,13 @@ fn reader(h: usize, ch: usize, sub: usize, stop: Arc<AtomicBool>, stats: Arc<Mut
     while !stop.load(Ordering::SeqCst) {
         let cw_on = crate::cw::ON.load(Ordering::Relaxed);
         let ft8_on = crate::ft8::ON.load(Ordering::Relaxed);
+        let want = crate::dsp::ZOOM.load(Ordering::Relaxed);
+        if want != zoom {
+            zoom = want;
+            let center = crate::ui::LO_OFFSET as f32;
+            zdec = (zoom > 1).then(|| crate::audio::Decim::new(center, zoom as usize));
+            an.set_zoom(zoom, if zoom > 1 { center } else { 0.0 });
+        }
         let mut got: u32 = 0;
         let r = unsafe {
             x::uac_host_device_read(
@@ -346,7 +356,14 @@ fn reader(h: usize, ch: usize, sub: usize, stop: Arc<AtomicBool>, stats: Arc<Mut
         for f in buf[..got as usize - got as usize % frame].chunks_exact(frame) {
             let i = sample(&f[..sub], sub) as f64;
             let q = if ch > 1 { sample(&f[sub..2 * sub], sub) as f64 } else { 0.0 };
-            an.push(i as f32, q as f32);
+            match zdec.as_mut() {
+                Some(z) => {
+                    if let Some((zi, zq)) = z.push(i as f32, q as f32) {
+                        an.push(zi, zq);
+                    }
+                }
+                None => an.push(i as f32, q as f32),
+            }
             if cw_on {
                 if let Some(a) = cw_demod.push(i as f32, q as f32) {
                     cw_dec.push(a);

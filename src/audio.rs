@@ -42,6 +42,76 @@ impl Nco {
     }
 }
 
+/// Karmaşık seyreltici (zoom-FFT girişi): `center` frekansını 0 Hz'e indirir,
+/// ±`48000/(2·decim)` bandı süzüp `decim` kat seyreltir. Kazanç 1.
+pub struct Decim {
+    nco: Nco,
+    taps: Vec<f32>,
+    hi: Vec<f32>,
+    hq: Vec<f32>,
+    pos: usize,
+    decim: usize,
+    phase: usize,
+}
+
+impl Decim {
+    pub fn new(center: f32, decim: usize) -> Self {
+        let ntaps = if decim >= 4 { 128 } else { 96 };
+        // Kesim, çıkış Nyquist'inin %90'ı: ekran kenarlarına kadar düz kalsın
+        let fc = 0.45 / decim as f32;
+        Self {
+            nco: Nco::new(-center, IN_RATE),
+            taps: lowpass(ntaps, fc),
+            hi: vec![0.0; ntaps],
+            hq: vec![0.0; ntaps],
+            pos: 0,
+            decim,
+            phase: 0,
+        }
+    }
+
+    #[inline]
+    pub fn push(&mut self, i: f32, q: f32) -> Option<(f32, f32)> {
+        let (bi, bq) = self.nco.mix(i, q);
+        self.hi[self.pos] = bi;
+        self.hq[self.pos] = bq;
+        self.pos = (self.pos + 1) % self.taps.len();
+        self.phase += 1;
+        if self.phase < self.decim {
+            return None;
+        }
+        self.phase = 0;
+        let n = self.taps.len();
+        let (mut si, mut sq) = (0.0f32, 0.0f32);
+        let mut k = self.pos;
+        for &t in &self.taps {
+            si += self.hi[k] * t;
+            sq += self.hq[k] * t;
+            k += 1;
+            if k == n {
+                k = 0;
+            }
+        }
+        Some((si, sq))
+    }
+}
+
+/// Blackman pencereli sinc alçak geçiren süzgeç (fc: örnek hızına oranla), DC kazancı 1
+fn lowpass(ntaps: usize, fc: f32) -> Vec<f32> {
+    let m = (ntaps - 1) as f32;
+    let mut taps: Vec<f32> = (0..ntaps)
+        .map(|n| {
+            let x = n as f32 - m / 2.0;
+            let sinc = if x == 0.0 { 2.0 * fc } else { (2.0 * PI * fc * x).sin() / (PI * x) };
+            let w = 0.42 - 0.5 * (2.0 * PI * n as f32 / m).cos() + 0.08 * (4.0 * PI * n as f32 / m).cos();
+            sinc * w
+        })
+        .collect();
+    let sum: f32 = taps.iter().sum();
+    taps.iter_mut().for_each(|t| *t /= sum);
+    taps
+}
+
 /// Karmaşık ses üreteci: 48 kHz I/Q → `rate` Hz gerçek ses
 pub struct Demod {
     pre: Nco,
@@ -72,19 +142,7 @@ impl Demod {
     /// `tone`: çıkışta `center`ın düşeceği ses frekansı (Hz)
     pub fn new(center: f32, cutoff: f32, decim: usize, tone: f32, target: f32) -> Self {
         let ntaps = 96;
-        let fc = cutoff / IN_RATE;
-        let m = (ntaps - 1) as f32;
-        let mut taps: Vec<f32> = (0..ntaps)
-            .map(|n| {
-                let x = n as f32 - m / 2.0;
-                let sinc = if x == 0.0 { 2.0 * fc } else { (2.0 * PI * fc * x).sin() / (PI * x) };
-                // Blackman penceresi
-                let w = 0.42 - 0.5 * (2.0 * PI * n as f32 / m).cos() + 0.08 * (4.0 * PI * n as f32 / m).cos();
-                sinc * w
-            })
-            .collect();
-        let sum: f32 = taps.iter().sum();
-        taps.iter_mut().for_each(|t| *t /= sum);
+        let taps = lowpass(ntaps, cutoff / IN_RATE);
         Self {
             pre: Nco::new(-center, IN_RATE),
             post: Nco::new(tone, IN_RATE / decim as f32),

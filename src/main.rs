@@ -313,6 +313,27 @@ fn main() -> anyhow::Result<()> {
                                     ui.set_spectrum_hidden(true);
                                     ui::draw_settings(&mut fb, &ui.settings());
                                 }
+                                ui::Key::Zoom => {
+                                    // ×1 → ×2 → ×4 → ×8 → ×1
+                                    let z = match ui.view().zoom {
+                                        1 => 2,
+                                        2 => 4,
+                                        4 => 8,
+                                        _ => 1,
+                                    };
+                                    info!("Büyütme x{z}");
+                                    dsp::ZOOM.store(z, std::sync::atomic::Ordering::Relaxed);
+                                    ui.set_zoom(&mut fb, z);
+                                    scale_for = None;
+                                    let active: &[ui::Key] = match panel {
+                                        ui::Panel::Cw => &[ui::Key::Cw],
+                                        ui::Panel::Ft8 => &[ui::Key::Ft8],
+                                        ui::Panel::None => &[],
+                                    };
+                                    ui.draw_keys(&mut fb, active);
+                                    cw_drawn = None;
+                                    ft8_drawn = None;
+                                }
                                 ui::Key::Cw | ui::Key::Ft8 => {
                                     // CW ve FT8 aynı anda açık olmaz
                                     let want = if panel == k_panel(k) { ui::Panel::None } else { k_panel(k) };
@@ -366,7 +387,7 @@ fn main() -> anyhow::Result<()> {
                             "AM" | "FM" => 1000,
                             _ => 100,
                         };
-                        let f = (ui::x_to_freq(x as i32, d) + snap / 2) / snap * snap;
+                        let f = (ui.view().x_to_freq(x as i32, d) + snap / 2) / snap * snap;
                         info!("Dokunarak ayar: {}", ui::fmt_freq(f));
                         usb::CAT_RX.lock().unwrap().clear();
                         let _ = c.send(&format!("FA{f:011};"));
@@ -384,17 +405,17 @@ fn main() -> anyhow::Result<()> {
             let s = dsp::SPECTRUM.lock().unwrap();
             (s.seq != last_seq && !s.db.is_empty()).then(|| {
                 last_seq = s.seq;
-                s.db.clone()
+                (s.db.clone(), s.zoom, s.center_hz, s.bin_hz)
             })
         };
-        if let Some(mut db) = spec {
-            if last_peaks.elapsed() >= Duration::from_secs(10) {
+        if let Some((mut db, szoom, center_hz, bin_hz)) = spec {
+            if szoom == 1 && last_peaks.elapsed() >= Duration::from_secs(10) {
                 last_peaks = Instant::now();
                 log_peaks(&db, dial);
             }
             // S-metre: geçiş bandındaki en güçlü bin (SSB/DIGI varsayılanı 2.7 kHz)
             let (a, b) = ui::passband(&mode, fw).unwrap_or((0, 2700));
-            let p = dsp::peak_in(&db, ui::LO_OFFSET + a, ui::LO_OFFSET + b);
+            let p = dsp::peak_in(&db, center_hz, bin_hz, ui::LO_OFFSET + a, ui::LO_OFFSET + b);
             let v = match smeter {
                 Some(s) if p < s => s + (p - s) * 0.15, // yavaş düşüş
                 _ => p,                                 // anında yükseliş
@@ -406,7 +427,7 @@ fn main() -> anyhow::Result<()> {
             // Band penceresi açıkken spektrum/şelale çizilmez (pencereyi bozmasın)
             if !band_popup {
                 let t0 = Instant::now();
-                ui.frame(&mut fb, &mut db, dial);
+                ui.frame(&mut fb, &mut db, szoom, dial);
                 draw_us += t0.elapsed().as_micros() as u64;
                 frames += 1;
             }
@@ -483,6 +504,7 @@ fn main() -> anyhow::Result<()> {
                 ok,
                 net: net_line,
                 smeter: sm,
+                zoom: ui.view().zoom,
             };
             ui.header(&mut fb, &hdr);
         }

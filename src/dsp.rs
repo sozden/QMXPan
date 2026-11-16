@@ -1,11 +1,17 @@
 //! I/Q örneklerinden güç spektrumu: 1024 noktalı karmaşık FFT.
 //!
-//! 48 kHz'de 1024 nokta → 46.9 Hz/bin, saniyede ~47 FFT. İki FFT'nin
-//! ortalaması yayımlanır (~23 kare/s). Dizinin ortası (N/2) LO frekansıdır;
-//! sol yarı LO'nun altı, sağ yarı üstü.
+//! Büyütme ×1: 48 kHz'de 1024 nokta → 46.9 Hz/bin, saniyede ~47 FFT; dizinin
+//! ortası LO frekansıdır. Büyütmede (×2/×4/×8) giriş, ayar frekansı 0 Hz'e
+//! indirilip seyreltilmiş akıştır (zoom-FFT): bin genişliği Z kat daralır,
+//! dizinin ortası ayar frekansıdır. FFT'ler örtüşmeli alınır, böylece her
+//! büyütmede saniyede ~47 FFT (iki FFT ortalaması → ~23 kare/s) korunur.
 
 use std::f32::consts::PI;
+use std::sync::atomic::AtomicU32;
 use std::sync::Mutex;
+
+/// İstenen büyütme (1, 2, 4, 8): ana döngü yazar, I/Q okuyucu uygular
+pub static ZOOM: AtomicU32 = AtomicU32::new(1);
 
 pub const N: usize = 1024;
 /// QMX I/Q kanallarının yönü ters gelirse (spektrum aynalanırsa) true yap
@@ -15,19 +21,29 @@ const AVG: u32 = 2;
 pub struct Spectrum {
     /// Her yeni sonuçta bir artar
     pub seq: u32,
-    /// dBFS cinsinden N değer, LO ortada
+    /// dBFS cinsinden N değer
     pub db: Vec<f32>,
+    /// Bu spektrumun büyütmesi (1, 2, 4, 8)
+    pub zoom: u32,
+    /// Dizinin ortasının (N/2) LO'ya göre frekansı (Hz)
+    pub center_hz: f32,
+    /// Bin genişliği (Hz)
+    pub bin_hz: f32,
 }
 
 pub static SPECTRUM: Mutex<Spectrum> = Mutex::new(Spectrum {
     seq: 0,
     db: Vec::new(),
+    zoom: 1,
+    center_hz: 0.0,
+    bin_hz: 48_000.0 / N as f32,
 });
 
 /// LO'ya göre [lo_hz, hi_hz] aralığındaki en güçlü bin'in dBFS değeri.
-pub fn peak_in(db: &[f32], lo_hz: i64, hi_hz: i64) -> f32 {
-    let bin_hz = 48_000.0 / N as f32;
-    let k = |hz: i64| ((N as f32 / 2.0 + hz as f32 / bin_hz).round() as isize).clamp(0, N as isize - 1) as usize;
+pub fn peak_in(db: &[f32], center_hz: f32, bin_hz: f32, lo_hz: i64, hi_hz: i64) -> f32 {
+    let k = |hz: i64| {
+        ((N as f32 / 2.0 + (hz as f32 - center_hz) / bin_hz).round() as isize).clamp(0, N as isize - 1) as usize
+    };
     let (a, b) = (k(lo_hz.min(hi_hz)), k(lo_hz.max(hi_hz)));
     db[a..=b].iter().cloned().fold(f32::MIN, f32::max)
 }
@@ -38,13 +54,21 @@ pub struct Analyzer {
     tw_re: Vec<f32>,
     tw_im: Vec<f32>,
     rev: Vec<u16>,
-    i: Vec<f32>,
-    q: Vec<f32>,
+    /// Son N örneğin halka tamponu
+    ri: Vec<f32>,
+    rq: Vec<f32>,
     pos: usize,
+    /// Son FFT'den beri gelen örnek; `hop`a ulaşınca yeni FFT
+    since: usize,
+    hop: usize,
+    filled: usize,
     re: Vec<f32>,
     im: Vec<f32>,
     acc: Vec<f32>,
     nacc: u32,
+    zoom: u32,
+    center_hz: f32,
+    bin_hz: f32,
 }
 
 impl Analyzer {
@@ -62,42 +86,71 @@ impl Analyzer {
         let rev = (0..N)
             .map(|k| ((k as u32).reverse_bits() >> (32 - bits)) as u16)
             .collect();
-        Self {
+        let mut a = Self {
             norm: 1.0 / (sum * sum),
             win,
             tw_re: (0..N / 2).map(|k| (-2.0 * PI * k as f32 / N as f32).cos()).collect(),
             tw_im: (0..N / 2).map(|k| (-2.0 * PI * k as f32 / N as f32).sin()).collect(),
             rev,
-            i: vec![0.0; N],
-            q: vec![0.0; N],
+            ri: vec![0.0; N],
+            rq: vec![0.0; N],
             pos: 0,
+            since: 0,
+            hop: N,
+            filled: 0,
             re: vec![0.0; N],
             im: vec![0.0; N],
             acc: vec![0.0; N],
             nacc: 0,
-        }
+            zoom: 1,
+            center_hz: 0.0,
+            bin_hz: 0.0,
+        };
+        a.set_zoom(1, 0.0);
+        a
+    }
+
+    /// Büyütmeyi ayarlar. `center_hz`: girişin 0 Hz'inin LO'ya göre frekansı.
+    pub fn set_zoom(&mut self, zoom: u32, center_hz: f32) {
+        let rate = 48_000.0 / zoom as f32;
+        self.zoom = zoom;
+        self.center_hz = center_hz;
+        self.bin_hz = rate / N as f32;
+        // Saniyede ~47 FFT: ×1'de örtüşmesiz, büyütmede örtüşmeli
+        self.hop = ((rate / 47.0) as usize).clamp(64, N);
+        self.since = 0;
+        self.filled = 0;
+        self.nacc = 0;
+        self.acc.fill(0.0);
     }
 
     #[inline]
     pub fn push(&mut self, i: f32, q: f32) {
         let (i, q) = if SWAP_IQ { (q, i) } else { (i, q) };
-        self.i[self.pos] = i;
-        self.q[self.pos] = q;
-        self.pos += 1;
-        if self.pos == N {
-            self.pos = 0;
+        self.ri[self.pos] = i;
+        self.rq[self.pos] = q;
+        self.pos = (self.pos + 1) % N;
+        self.filled = (self.filled + 1).min(N);
+        self.since += 1;
+        if self.since >= self.hop && self.filled == N {
+            self.since = 0;
             self.process();
         }
     }
 
     fn process(&mut self) {
-        // DC kaymasını at (LO'daki sabit tepe küçülsün)
-        let mi = self.i.iter().sum::<f32>() / N as f32;
-        let mq = self.q.iter().sum::<f32>() / N as f32;
+        // Halkadaki örnekler, eskiden yeniye. ×1'de DC kayması atılır (LO tepesi);
+        // büyütmede 0 Hz ayar frekansıdır, oradaki sinyal silinmemeli
+        let (mi, mq) = if self.zoom == 1 {
+            (self.ri.iter().sum::<f32>() / N as f32, self.rq.iter().sum::<f32>() / N as f32)
+        } else {
+            (0.0, 0.0)
+        };
         for k in 0..N {
+            let s = (self.pos + k) % N;
             let r = self.rev[k] as usize;
-            self.re[r] = (self.i[k] - mi) * self.win[k];
-            self.im[r] = (self.q[k] - mq) * self.win[k];
+            self.re[r] = (self.ri[s] - mi) * self.win[k];
+            self.im[r] = (self.rq[s] - mq) * self.win[k];
         }
         // Yerinde, iteratif radix-2 FFT
         let mut len = 2;
@@ -133,6 +186,9 @@ impl Analyzer {
                 s.db[k] = 10.0 * (self.acc[k] * scale).max(1e-14).log10();
                 self.acc[k] = 0.0;
             }
+            s.zoom = self.zoom;
+            s.center_hz = self.center_hz;
+            s.bin_hz = self.bin_hz;
             s.seq = s.seq.wrapping_add(1);
             self.nacc = 0;
         }

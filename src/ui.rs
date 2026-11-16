@@ -45,13 +45,53 @@ pub const WF_H: usize = 128;
 const KEY_Y: i32 = 444;
 const KEY_H: i32 = 30;
 
-pub const HZ_PER_PX: i64 = 60;
 /// QMX'te LO, ayar frekansının bu kadar altında
 pub const LO_OFFSET: i64 = 12_000;
-pub const DIAL_X: i32 = (W as i64 / 2 + LO_OFFSET / HZ_PER_PX) as i32;
-/// LO sızıntısının bastırıldığı bölge (±700 Hz ≈ ±12 piksel): "veri yok"
-const LO_X0: usize = W / 2 - 12;
-const LO_X1: usize = W / 2 + 12;
+
+/// Yatay eksen: büyütmeye göre Hz/piksel, ayar çizgisinin yeri, LO bölgesi.
+/// ×1: 48 kHz, ortada LO, ayar çizgisi x=600. Büyütmede ortada ayar frekansı.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct View {
+    pub zoom: u32,
+}
+
+// Not: hesaplar tam sayıyla (Hz/piksel = 60/zoom). f64 kullanan sürüm Xtensa
+// LLVM'de "Cannot select: Constant<32000>" derleme hatası veriyordu.
+impl View {
+    /// `px` piksel kaç Hz (60/zoom Hz/piksel)
+    pub fn px_to_hz(&self, px: i64) -> i64 {
+        px * 60 / self.zoom as i64
+    }
+    /// `hz` kaç piksel (aşağı yuvarlanır)
+    pub fn hz_to_px(&self, hz: i64) -> i64 {
+        hz * self.zoom as i64 / 60
+    }
+    pub fn dial_x(&self) -> i32 {
+        if self.zoom == 1 {
+            (W as i64 / 2 + LO_OFFSET / 60) as i32
+        } else {
+            W as i32 / 2
+        }
+    }
+    /// LO sızıntısının bastırıldığı "veri yok" bölgesi (±700 Hz ≈ ±12 piksel)
+    pub fn lo_region(&self) -> Option<(usize, usize)> {
+        (self.zoom == 1).then_some((W / 2 - 12, W / 2 + 12))
+    }
+    /// Ekranın ortasındaki (x=400) frekans
+    pub fn center(&self, dial: u64) -> i64 {
+        if self.zoom == 1 {
+            dial as i64 - LO_OFFSET
+        } else {
+            dial as i64
+        }
+    }
+    pub fn x_to_freq(&self, x: i32, dial: u64) -> u64 {
+        (self.center(dial) + self.px_to_hz(x as i64 - W as i64 / 2)).max(0) as u64
+    }
+    fn in_lo(&self, x: usize) -> bool {
+        self.lo_region().is_some_and(|(a, b)| x >= a && x <= b)
+    }
+}
 
 /// Üst şeritteki mod çipleri (QMX CAT kodları: MD1 LSB, MD2 USB, MD3 CW, MD6 DIGI)
 pub const MODES: [&str; 4] = ["LSB", "USB", "CW", "DIGI"];
@@ -62,7 +102,7 @@ pub enum Key {
     Cw,
     Ft8,
     Display,
-    Wifi,
+    Zoom,
     Menu,
 }
 /// (tuş, yazı, etkin mi)
@@ -71,7 +111,7 @@ const KEYS: [(Key, &str, bool); 6] = [
     (Key::Cw, "CW", true),
     (Key::Ft8, "FT8", true),
     (Key::Display, "DISPLAY", true),
-    (Key::Wifi, "WIFI", false),
+    (Key::Zoom, "ZOOM", true),
     (Key::Menu, "MENU", false),
 ];
 
@@ -147,11 +187,6 @@ pub fn fmt_freq(hz: u64) -> String {
     format!("{mhz}.{khz:03}.{h:03}")
 }
 
-/// Dokunulan x koordinatının ayar frekansına karşılığı
-pub fn x_to_freq(x: i32, dial: u64) -> u64 {
-    let lo = dial as i64 - LO_OFFSET;
-    (lo + (x as i64 - W as i64 / 2) * HZ_PER_PX) as u64
-}
 
 // ---------------------------------------------------------------- paletler
 
@@ -215,6 +250,7 @@ pub struct Hdr {
     pub net: String,
     /// dBm, tam sayıya yuvarlanmış (1 dB değişimde yeniden çizilir)
     pub smeter: Option<i32>,
+    pub zoom: u32,
 }
 
 pub struct Ui {
@@ -228,7 +264,9 @@ pub struct Ui {
     set: Settings,
     spectrum_hidden: bool,
     /// Şelalenin çizildiği ayar frekansı (yatay kaydırma için)
-    wf_dial: Option<u64>,
+    wf_dial: Option<i64>,
+    /// Yatay eksen (büyütme)
+    view: View,
     wf_acc: Vec<f32>,
     wf_count: u32,
     // Kare başına geçici tamponlar (ana görev yığını küçük; burada tutulur)
@@ -274,6 +312,7 @@ impl Ui {
             set: Settings::default(),
             spectrum_hidden: false,
             wf_dial: None,
+            view: View { zoom: 1 },
             wf_acc: vec![f32::MIN; W],
             wf_count: 0,
             col: vec![0.0; W],
@@ -306,7 +345,7 @@ impl Ui {
         ui.draw_freq(fb, None);
         ui.draw_band_card(fb, None);
         ui.draw_smeter(fb, None);
-        ui.draw_chips(fb, "", None);
+        ui.draw_chips(fb, "", None, 1);
         ui
     }
 
@@ -327,8 +366,8 @@ impl Ui {
         if h.smeter != old.smeter {
             self.draw_smeter(fb, h.smeter);
         }
-        if h.mode != old.mode || h.bw != old.bw {
-            self.draw_chips(fb, &h.mode, h.bw);
+        if h.mode != old.mode || h.bw != old.bw || h.zoom != old.zoom {
+            self.draw_chips(fb, &h.mode, h.bw, h.zoom);
         }
         self.last = h.clone();
     }
@@ -418,7 +457,7 @@ impl Ui {
         }
     }
 
-    fn draw_chips(&self, fb: &mut Framebuffer, mode: &str, bw: Option<u32>) {
+    fn draw_chips(&self, fb: &mut Framebuffer, mode: &str, bw: Option<u32>, zoom: u32) {
         gfx::fill(fb, 0, CHIP_Y - 2, W as i32, CHIP_H + 4, th::BG);
         for (i, m) in MODES.iter().enumerate() {
             let x = MODE_X + i as i32 * MODE_STEP;
@@ -438,7 +477,7 @@ impl Ui {
             None => "—".into(),
         };
         chip(fb, 268, 112, "BW", &bws, th::CY);
-        chip(fb, 388, 112, "SPAN", "48 kHz", th::TX);
+        chip(fb, 388, 112, "SPAN", &format!("{} kHz", 48 / zoom.max(1)), if zoom > 1 { th::CY } else { th::TX });
         if !MODES.contains(&mode) && !mode.is_empty() {
             chip(fb, 508, 112, "MODE", mode, th::AM);
         }
@@ -456,6 +495,13 @@ impl Ui {
                 _ => (th::PN, th::LN),
             };
             rrect(fb, x, KEY_Y, 125, KEY_H, 7, bg);
+            let zl;
+            let label = if *k == Key::Zoom && self.view.zoom > 1 {
+                zl = format!("ZOOM x{}", self.view.zoom);
+                zl.as_str()
+            } else {
+                label
+            };
             text_c(fb, &F_B14, x + 62, KEY_Y + 20, label, fg);
         }
     }
@@ -567,27 +613,56 @@ impl Ui {
 
     // ------------------------------------------------------------- ölçek
 
-    /// Frekans ölçeği: 5 kHz'de bir etiket, 1 kHz'de bir çentik
+    /// Frekans ölçeği: etiket aralığı büyütmeye göre (×1: 5 kHz … ×8: 500 Hz)
     pub fn scale(&self, fb: &mut Framebuffer, dial: Option<u64>) {
         gfx::fill(fb, 0, SCALE_Y as i32, W as i32, SCALE_H as i32, th::BG);
         let Some(dial) = dial else { return };
-        let lo = dial as i64 - LO_OFFSET;
-        let left = lo - (W as i64 / 2) * HZ_PER_PX;
-        let mut f = (left / 1000 + 1) * 1000;
-        while f < left + W as i64 * HZ_PER_PX {
-            let x = ((f - left) / HZ_PER_PX) as i32;
-            let major = f % 5000 == 0;
-            gfx::fill(fb, x, SCALE_Y as i32, 1, if major { 5 } else { 3 }, th::MU);
-            if major {
-                let s = format!("{}.{:03}", f / 1_000_000, (f / 1000) % 1000);
+        let v = self.view;
+        let (major, minor): (i64, i64) = match v.zoom {
+            1 => (5000, 1000),
+            2 => (2000, 500),
+            4 => (1000, 200),
+            _ => (500, 100),
+        };
+        let left = v.center(dial) - v.px_to_hz(W as i64 / 2);
+        let right = left + v.px_to_hz(W as i64);
+        let mut f = (left / minor + 1) * minor;
+        while f < right {
+            let x = v.hz_to_px(f - left) as i32;
+            let is_major = f % major == 0;
+            gfx::fill(fb, x, SCALE_Y as i32, 1, if is_major { 5 } else { 3 }, th::MU);
+            if is_major {
+                let s = if major >= 1000 {
+                    format!("{}.{:03}", f / 1_000_000, (f / 1000) % 1000)
+                } else {
+                    format!("{}.{:03}.{}", f / 1_000_000, (f / 1000) % 1000, (f % 1000) / 100)
+                };
                 text_c(fb, &F_R11, x, SCALE_Y as i32 + 17, &s, th::MU);
             }
-            f += 1000;
+            f += minor;
         }
         // Ayar işareti: kehribar üçgen
+        let dx = v.dial_x();
         for dy in 0..6 {
-            gfx::fill(fb, DIAL_X - 5 + dy, SCALE_Y as i32 + dy, 11 - 2 * dy, 1, th::AM);
+            gfx::fill(fb, dx - 5 + dy, SCALE_Y as i32 + dy, 11 - 2 * dy, 1, th::AM);
         }
+    }
+
+    pub fn view(&self) -> View {
+        self.view
+    }
+
+    /// Büyütmeyi değiştirir: eksen, katmanlar ve şelale baştan kurulur.
+    pub fn set_zoom(&mut self, fb: &mut Framebuffer, zoom: u32) {
+        if zoom == self.view.zoom {
+            return;
+        }
+        self.view = View { zoom };
+        self.layers_for = None;
+        self.over_for = None;
+        self.full_redraw = true;
+        self.smooth.fill(-130.0);
+        self.clear_waterfall(fb);
     }
 
     // --------------------------------------------------- ayarlar ve durum
@@ -646,10 +721,10 @@ impl Ui {
 
     /// Geçiş bandını ayar frekansına göre Hz cinsinden ayarlar.
     pub fn set_passband(&mut self, pb: Option<(i64, i64)>) {
+        let v = self.view;
         let px = pb.map(|(a, b)| {
-            let x0 = (DIAL_X as i64 + a / HZ_PER_PX).clamp(0, W as i64 - 1) as usize;
-            let x1 = (DIAL_X as i64 + b / HZ_PER_PX).clamp(0, W as i64 - 1) as usize;
-            (x0, x1)
+            let to_x = |h: i64| (v.dial_x() as i64 + v.hz_to_px(h)).clamp(0, W as i64 - 1) as usize;
+            (to_x(a), to_x(b))
         });
         if px != self.pb {
             self.pb = px;
@@ -672,6 +747,8 @@ impl Ui {
 
     /// Zemin katmanı: panel, dB ızgarası ve etiketleri, geçiş bandı, LO bölgesi.
     /// Dolgu katmanı: aynısının üstüne %14 camgöbeği.
+    // Xtensa LLVM 'Cannot select: Constant' hatasından kaçınmak için satır içine alınmaz
+    #[inline(never)]
     fn build_layers(&mut self) {
         let grid_rows = self.grid_rows();
         let bg = &mut self.bg;
@@ -686,18 +763,21 @@ impl Ui {
                 }
             }
         }
-        // LO bölgesi: koyu zemin üstüne çapraz tarama
-        for y in 0..SPEC_H {
-            for x in LO_X0..=LO_X1 {
-                let hatch = (x + y) % 7 == 0;
-                bg.buf[y * W + x] = if hatch { th::LO_HATCH } else { th::LO_BG };
+        // LO bölgesi (yalnız ×1'de görünür): koyu zemin üstüne çapraz tarama
+        let v = self.view;
+        if let Some((l0, l1)) = v.lo_region() {
+            for y in 0..SPEC_H {
+                for x in l0..=l1 {
+                    let hatch = (x + y) % 7 == 0;
+                    bg.buf[y * W + x] = if hatch { th::LO_HATCH } else { th::LO_BG };
+                }
             }
+            text_c(bg, &F_R11, W as i32 / 2, 14, "LO", th::MU);
         }
-        text_c(bg, &F_R11, W as i32 / 2, 14, "LO", th::MU);
         // 10 dB'de bir ızgara çizgisi (etiketleri üst katmanda, iz üstlerini örtmesin)
         for y in grid_rows {
             for x in 0..W {
-                if !(LO_X0..=LO_X1).contains(&x) {
+                if !v.in_lo(x) {
                     let i = y * W + x;
                     bg.buf[i] = blend(bg.buf[i], th::LN, 200);
                 }
@@ -741,9 +821,12 @@ impl Ui {
 
     /// Üst katman: dBm etiketleri (koyu zeminli), ayar frekansında kesikli
     /// kehribar çizgi ve frekans etiketi. İzin üstünde kalır.
+    // Xtensa LLVM 'Cannot select: Constant' hatasından kaçınmak için satır içine alınmaz
+    #[inline(never)]
     fn build_overlay(&mut self, dial: Option<u64>) {
         // Eski etiketin kapladığı sütunlar yeniden çizilsin
-        for x in DIAL_X as usize - 45..=DIAL_X as usize + 45 {
+        let dxu = self.view.dial_x() as usize;
+        for x in dxu - 45..=(dxu + 45).min(W - 1) {
             self.force[x] = true;
         }
         let grid = self.grid();
@@ -759,31 +842,43 @@ impl Ui {
             rrect(o, 2, yy - 7, w, 13, 4, th::PN);
             text(o, &F_R11, 6, yy + 4, &s, th::MU);
         }
+        let dx = self.view.dial_x();
+        // Kesikli çizgi. Adım black_box ile gizlenir: LLVM'in Xtensa arka ucu bu
+        // döngüden türettiği 40·W = 32000 sabitini seçemeyip derlemeyi kesiyordu.
+        let stride = core::hint::black_box(W);
+        let mut i = 20 * stride + dx as usize;
         for y in 20..SPEC_H {
             if y % 7 < 4 {
-                o.buf[y * W + DIAL_X as usize] = th::AM;
+                o.buf[i] = th::AM;
             }
+            i += stride;
         }
         if let Some(d) = dial {
             let s = fmt_freq(d);
             let w = gfx::text_w(&F_B12, &s) + 14;
             // Etiket önce spektrum zemin rengine boyanır ki yuvarlak köşelerin
             // yumuşatması siyaha (saydam) değil zemine karışsın
-            gfx::fill(o, DIAL_X - w / 2, 3, w, 15, th::SPEC_BG);
-            rrect(o, DIAL_X - w / 2, 3, w, 15, 7, th::AM);
-            text_c(o, &F_B12, DIAL_X, 15, &s, th::ON_AM);
+            gfx::fill(o, dx - w / 2, 3, w, 15, th::SPEC_BG);
+            rrect(o, dx - w / 2, 3, w, 15, 7, th::AM);
+            text_c(o, &F_B12, dx, 15, &s, th::ON_AM);
         }
     }
 
     // ------------------------------------------------------------- kare
 
     /// Yeni bir spektrum karesini çizer ve şelaleye bir satır ekler.
-    pub fn frame(&mut self, fb: &mut Framebuffer, db: &mut [f32], dial: Option<u64>) {
-        // LO sızıntısını komşu bin'lerin ortalamasıyla ört (şelalede de görünmesin)
-        let c = N / 2;
-        let edge = (db[c - 17] + db[c - 16] + db[c + 16] + db[c + 17]) / 4.0;
-        for v in &mut db[c - 15..=c + 15] {
-            *v = edge;
+    pub fn frame(&mut self, fb: &mut Framebuffer, db: &mut [f32], zoom: u32, dial: Option<u64>) {
+        // Büyütme değişirken eski büyütmeyle hesaplanmış kareler atlanır
+        if zoom != self.view.zoom {
+            return;
+        }
+        // ×1'de LO sızıntısını komşu bin'lerin ortalamasıyla ört
+        if zoom == 1 {
+            let c = N / 2;
+            let edge = (db[c - 17] + db[c - 16] + db[c + 16] + db[c + 17]) / 4.0;
+            for v in &mut db[c - 15..=c + 15] {
+                *v = edge;
+            }
         }
 
         let a = self.set.smooth as f32 / 100.0;
@@ -844,6 +939,8 @@ impl Ui {
 
     /// Spektrumu çizer: her sütunda yalnız önceki kareye göre değişebilecek
     /// pikseller yazılır; renkler önceden hazırlanmış katmanlardan gelir.
+    // Xtensa LLVM 'Cannot select: Constant' hatasından kaçınmak için satır içine alınmaz
+    #[inline(never)]
     fn draw_spectrum(&mut self, fb: &mut Framebuffer) {
         let range = self.set.spec_range as f32;
         let bottom = self.bottom;
@@ -855,12 +952,14 @@ impl Ui {
         core::mem::swap(&mut self.ty, &mut self.pty);
         core::mem::swap(&mut self.seg, &mut self.pseg);
         let mut prev = to_y(self.smooth[0]);
+        let v = self.view;
         for x in 0..W {
-            if (LO_X0..=LO_X1).contains(&x) {
+            if v.in_lo(x) {
                 // LO bölgesinde iz yok
                 self.ty[x] = SPEC_Y + SPEC_H;
                 self.seg[x] = (usize::MAX, 0);
-                prev = to_y(self.smooth[(LO_X1 + 1).min(W - 1)]);
+                let after = v.lo_region().map_or(x, |(_, b)| b + 1).min(W - 1);
+                prev = to_y(self.smooth[after]);
                 continue;
             }
             let y = to_y(self.smooth[x]);
@@ -906,17 +1005,24 @@ impl Ui {
         }
     }
 
+    // Xtensa LLVM 'Cannot select: Constant' hatasından kaçınmak için satır içine alınmaz
+    #[inline(never)]
     fn waterfall_line(&mut self, fb: &mut Framebuffer, col: &[f32], dial: Option<u64>) {
         // Frekans değiştiyse eski satırları yatayda kaydır ki sinyaller hizalı kalsın
+        // Kayma tam piksel kadar yapılır; artan Hz'ler sonraki kaymaya kalır.
+        // wf_dial, kesirli Hz/piksel (×8'de 7.5) için Hz × 2 birimindedir.
+        let z = self.view.zoom as i64;
         match (dial, self.wf_dial) {
-            (Some(d), Some(old)) => {
-                let shift = (old as i64 - d as i64) / HZ_PER_PX;
+            (Some(d), Some(old2)) => {
+                let d2 = d as i64 * 2;
+                // piksel = Δ(Hz) · zoom / 60 = Δ(Hz×2) · zoom / 120
+                let shift = (old2 - d2) * z / 120;
                 if shift != 0 {
                     shift_rows(fb, shift, self.wf_h);
-                    self.wf_dial = Some((old as i64 - shift * HZ_PER_PX) as u64);
+                    self.wf_dial = Some(old2 - shift * 120 / z);
                 }
             }
-            (Some(d), None) => self.wf_dial = Some(d),
+            (Some(d), None) => self.wf_dial = Some(d as i64 * 2),
             (None, _) => {}
         }
         let start = WF_Y * W;
@@ -925,7 +1031,7 @@ impl Ui {
         let lo = self.floor - 3.0 - self.set.wf_bright as f32;
         let span = self.set.wf_span as f32;
         for x in 0..W {
-            fb.buf[start + x] = if (LO_X0..=LO_X1).contains(&x) {
+            fb.buf[start + x] = if self.view.in_lo(x) {
                 th::LO_BG
             } else {
                 let t = ((col[x] - lo) / span).clamp(0.0, 1.0);
