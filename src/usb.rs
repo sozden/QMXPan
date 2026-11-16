@@ -319,24 +319,35 @@ fn reader(h: usize, ch: usize, sub: usize, stop: Arc<AtomicBool>, stats: Arc<Mut
     let (mut n, mut si, mut sq, mut siq) = (0u64, 0f64, 0f64, 0f64);
     let mut t0 = Instant::now();
     let mut an = crate::dsp::Analyzer::new();
-    // Büyütme: ayar frekansı (LO + 12 kHz) 0 Hz'e indirilip seyreltilir
+    // Ayar frekansının LO'ya göre konumu: 12000, CW'de 12000 + CW offset
+    let if_of = || crate::dsp::IF_HZ.load(Ordering::Relaxed);
+    let mut if_hz = if_of();
+    // Büyütme: ayar frekansı (LO + IF) 0 Hz'e indirilip seyreltilir
     let mut zoom = 1u32;
     let mut zdec: Option<crate::audio::Decim> = None;
     // CW: ayar frekansındaki sinyal → 700 Hz ton, 6 kHz (±900 Hz pencere)
-    let mut cw_demod = crate::audio::Demod::new(12_000.0, 900.0, 8, 700.0, 100.0);
+    let mk_cw = |f: u32| crate::audio::Demod::new(f as f32, 900.0, 8, 700.0, 100.0);
+    let mut cw_demod = mk_cw(if_hz);
     // Susturma 6 (~13 dB): bant gürültüsü ve parazitten sahte E/I/T daha az çıksın
     let mut cw_dec = crate::cw::Decoder::new(700.0, true, 6);
     let mut cw_t = Instant::now();
     // FT8: USB geçiş bandı (ayar + 0..3 kHz) → 12 kHz gerçek ses
-    let mut ft8_demod = crate::audio::Demod::new(12_000.0 + 1_500.0, 1_700.0, 4, 1_500.0, 0.05);
+    let mk_ft8 = |f: u32| crate::audio::Demod::new(f as f32 + 1_500.0, 1_700.0, 4, 1_500.0, 0.05);
+    let mut ft8_demod = mk_ft8(if_hz);
     let mut ft8_buf: Vec<f32> = Vec::with_capacity(256);
     while !stop.load(Ordering::SeqCst) {
         let cw_on = crate::cw::ON.load(Ordering::Relaxed);
         let ft8_on = crate::ft8::ON.load(Ordering::Relaxed);
         let want = crate::dsp::ZOOM.load(Ordering::Relaxed);
-        if want != zoom {
+        let want_if = if_of();
+        if want != zoom || want_if != if_hz {
             zoom = want;
-            let center = crate::ui::LO_OFFSET as f32;
+            if want_if != if_hz {
+                if_hz = want_if;
+                cw_demod = mk_cw(if_hz);
+                ft8_demod = mk_ft8(if_hz);
+            }
+            let center = if_hz as f32;
             zdec = (zoom > 1).then(|| crate::audio::Decim::new(center, zoom as usize));
             an.set_zoom(zoom, if zoom > 1 { center } else { 0.0 });
         }

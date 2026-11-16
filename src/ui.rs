@@ -45,16 +45,20 @@ pub const WF_H: usize = 128;
 const KEY_Y: i32 = 444;
 const KEY_H: i32 = 30;
 
-/// QMX'te LO, ayar frekansının bu kadar altında
+/// QMX'te LO, ayar frekansının bu kadar altında (CW dışındaki modlarda).
+/// CW'de buna QMX'in "CW offset" değeri eklenir (varsayılan 700 Hz):
+/// IF = 12000 + CW offset. Bkz. dsp::IF_HZ.
 pub const LO_OFFSET: i64 = 12_000;
 /// Ekranın yarı genişliği (piksel)
 pub const W_HALF: i64 = W as i64 / 2;
 
 /// Yatay eksen: büyütmeye göre Hz/piksel, ayar çizgisinin yeri, LO bölgesi.
-/// ×1: 48 kHz, ortada LO, ayar çizgisi x=600. Büyütmede ortada ayar frekansı.
+/// ×1: 48 kHz, ortada LO, ayar çizgisi LO + IF'te. Büyütmede ortada ayar frekansı.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct View {
     pub zoom: u32,
+    /// Ayar frekansının LO'ya göre konumu (Hz): 12000, CW'de 12000 + CW offset
+    pub if_hz: i64,
 }
 
 // Not: hesaplar tam sayıyla (Hz/piksel = 60/zoom). f64 kullanan sürüm Xtensa
@@ -70,7 +74,7 @@ impl View {
     }
     pub fn dial_x(&self) -> i32 {
         if self.zoom == 1 {
-            (W as i64 / 2 + LO_OFFSET / 60) as i32
+            (W as i64 / 2 + self.if_hz / 60) as i32
         } else {
             W as i32 / 2
         }
@@ -82,7 +86,7 @@ impl View {
     /// Ekranın ortasındaki (x=400) frekans
     pub fn center(&self, dial: u64) -> i64 {
         if self.zoom == 1 {
-            dial as i64 - LO_OFFSET
+            dial as i64 - self.if_hz
         } else {
             dial as i64
         }
@@ -328,7 +332,7 @@ impl Ui {
             set: Settings::default(),
             spectrum_hidden: false,
             wf_dial: None,
-            view: View { zoom: 1 },
+            view: View { zoom: 1, if_hz: LO_OFFSET },
             labels: Vec::new(),
             label_hits: Vec::new(),
             ft8_key: "FT8",
@@ -700,7 +704,19 @@ impl Ui {
         if zoom == self.view.zoom {
             return;
         }
-        self.view = View { zoom };
+        self.set_view(fb, View { zoom, if_hz: self.view.if_hz });
+    }
+
+    /// Ayar frekansının LO'ya göre konumunu değiştirir (CW'ye geçince / CW offset).
+    pub fn set_if(&mut self, fb: &mut Framebuffer, if_hz: i64) {
+        if if_hz == self.view.if_hz {
+            return;
+        }
+        self.set_view(fb, View { zoom: self.view.zoom, if_hz });
+    }
+
+    fn set_view(&mut self, fb: &mut Framebuffer, v: View) {
+        self.view = v;
         self.layers_for = None;
         self.over_for = None;
         self.full_redraw = true;

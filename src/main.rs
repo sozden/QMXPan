@@ -110,6 +110,8 @@ fn main() -> anyhow::Result<()> {
     let mut hold_dial_until = Instant::now();
     let mut hold_mode_until = Instant::now();
     let mut fw: Option<u32> = None;
+    // QMX'in CW offset'i (CW'de LO'yu bu kadar daha aşağı koyar); QMX'ten okunur
+    let mut cw_offset: u32 = 700;
     let mut last_fw_raw: Option<String> = None;
     let mut last_q9_fix = Instant::now() - Duration::from_secs(10);
 
@@ -198,8 +200,22 @@ fn main() -> anyhow::Result<()> {
                 last_poll = Instant::now();
                 polls += 1;
                 // 5 sn'de bir I/Q modunu da doğrula (QMX menüsü ya da MU; kapatabilir)
-                // 5 sn'de bir I/Q modunu ve filtre genişliğini de sor
-                let _ = c.send(if polls % 10 == 0 { "FA;MD;Q9;FW;" } else { "FA;MD;" });
+                // 5 sn'de bir I/Q modunu ve filtre genişliğini, CW'de ayrıca
+                // CW offset'i sor (QMX'in menüsünden değiştirilebilir)
+                let is_cw = mode.starts_with("CW");
+                let q = match polls % 10 {
+                    0 => "FA;MD;Q9;FW;",
+                    5 if is_cw => "FA;MD;MMCW|CW offset;",
+                    _ => "FA;MD;",
+                };
+                let _ = c.send(q);
+            }
+            // "MM700;": QMX'in CW offset'i (500..950 Hz)
+            if let Some(v) = cat_value("MM").and_then(|v| v.trim().parse::<u32>().ok()) {
+                if (500..=950).contains(&v) && v != cw_offset {
+                    info!("QMX CW offset: {v} Hz");
+                    cw_offset = v;
+                }
             }
             if let Some(q) = cat_value("Q9") {
                 iq_on = q.trim() == "1";
@@ -226,6 +242,15 @@ fn main() -> anyhow::Result<()> {
                 last_fw_raw = fw_raw.clone();
             }
             fw = fw_raw.and_then(|v| v.trim().parse::<u32>().ok()).filter(|&w| (50..=10_000).contains(&w));
+        }
+        // CW'de QMX, LO'yu CW offset kadar daha aşağı koyar: ayar frekansı
+        // ana bantta 12000 + CW offset'tedir (diğer modlarda 12000)
+        let if_hz = ui::LO_OFFSET + if mode.starts_with("CW") { cw_offset as i64 } else { 0 };
+        if if_hz != ui.view().if_hz {
+            info!("IF {if_hz} Hz ({mode})");
+            dsp::IF_HZ.store(if_hz as u32, std::sync::atomic::Ordering::Relaxed);
+            ui.set_if(&mut fb, if_hz);
+            scale_for = None;
         }
         ui.set_passband(ui::passband(&mode, fw));
 
@@ -436,7 +461,8 @@ fn main() -> anyhow::Result<()> {
             }
             // S-metre: geçiş bandındaki en güçlü bin (SSB/DIGI varsayılanı 2.7 kHz)
             let (a, b) = ui::passband(&mode, fw).unwrap_or((0, 2700));
-            let p = dsp::peak_in(&db, center_hz, bin_hz, ui::LO_OFFSET + a, ui::LO_OFFSET + b);
+            let ifh = ui.view().if_hz;
+            let p = dsp::peak_in(&db, center_hz, bin_hz, ifh + a, ifh + b);
             let v = match smeter {
                 Some(s) if p < s => s + (p - s) * 0.15, // yavaş düşüş
                 _ => p,                                 // anında yükseliş

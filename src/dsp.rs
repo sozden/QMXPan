@@ -12,6 +12,9 @@ use std::sync::Mutex;
 
 /// İstenen büyütme (1, 2, 4, 8): ana döngü yazar, I/Q okuyucu uygular
 pub static ZOOM: AtomicU32 = AtomicU32::new(1);
+/// Ayar frekansının LO'ya göre konumu (Hz): 12000; CW'de 12000 + CW offset.
+/// Ana döngü yazar; büyütme, CW ve FT8 sesi bunu merkez alır.
+pub static IF_HZ: AtomicU32 = AtomicU32::new(12_000);
 
 pub const N: usize = 1024;
 /// QMX I/Q kanallarının yönü ters gelirse (spektrum aynalanırsa) true yap

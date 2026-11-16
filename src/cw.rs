@@ -26,6 +26,10 @@ pub struct Stat {
 pub static STAT: Mutex<Stat> = Mutex::new(Stat { wpm: 0, tone_hz: 0, snr_db: 0, key: false });
 
 pub const FS: f32 = 6_000.0;
+/// Kilitlenilen ton aralığı: ayar frekansı (700 Hz) ±150 Hz, yani QMX'in
+/// 300 Hz'lik CW filtresi kadar
+const LOCK_MIN: f32 = 550.0;
+const LOCK_MAX: f32 = 850.0;
 const DECIM: usize = 1;
 /// Goertzel pencere uzunluğu ve adım (örnek, 5 kHz'de)
 const N: usize = 64; // 12,8 ms
@@ -155,7 +159,7 @@ impl Decoder {
     }
 
     pub fn set_freq(&mut self, f: f32) {
-        self.freq = f.clamp(300.0, 1200.0);
+        self.freq = f.clamp(LOCK_MIN, LOCK_MAX);
         self.coeff = coeff_for(self.freq);
     }
 
@@ -204,18 +208,19 @@ impl Decoder {
         p.sqrt() / N as f32
     }
 
-    /// Aynı anda komşu frekanslardaki ortalama genlik (geniş bant gürültü tahmini).
+    /// Komşu frekanslardaki en düşük genlik (geniş bant gürültü tahmini).
     /// Gerçek CW tonu dar banttır; gürültü ise komşu frekanslarda da aynı güçtedir.
+    /// Ortalama yerine en küçüğü: panadapterde yandaki tek bir güçlü istasyon
+    /// ortalamayı şişirip ayardaki sinyali "gürültü" saydırıyordu.
     fn side_noise(&self) -> f32 {
-        let (mut sum, mut n) = (0.0, 0);
+        let mut m = f32::MAX;
         for off in [-450.0, -250.0, 250.0, 450.0] {
             let f = self.freq + off;
             if (150.0..=2000.0).contains(&f) {
-                sum += self.mag(f);
-                n += 1;
+                m = m.min(self.mag(f));
             }
         }
-        sum / n.max(1) as f32
+        if m == f32::MAX { 0.0 } else { m }
     }
 
     fn hop(&mut self) {
@@ -294,7 +299,10 @@ impl Decoder {
         }
     }
 
-    /// 300..1200 Hz arasında en güçlü tonu ara
+    /// En güçlü tonu ara. Gürültü referansı (ortanca) 300..1200 Hz'ten alınır,
+    /// ama kilitlenilecek ton yalnızca LOCK_MIN..LOCK_MAX içinden seçilir:
+    /// panadapterde ayar frekansı 700 Hz'e düşer, kullanıcı sinyali ayar
+    /// çizgisine getirir; ±450 Hz'lik arama yandaki istasyonlara atlıyordu.
     fn scan(&mut self) {
         let mut best = (0.0f32, 0.0f32);
         let mut powers = [0.0f32; 91];
@@ -302,7 +310,7 @@ impl Decoder {
             let f = 300.0 + i as f32 * 10.0;
             let p = goertzel(self.last(SCAN_LEN), coeff_for(f));
             *pw = p;
-            if p > best.1 {
+            if (LOCK_MIN..=LOCK_MAX).contains(&f) && p > best.1 {
                 best = (f, p);
             }
         }
