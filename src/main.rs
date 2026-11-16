@@ -7,6 +7,8 @@
 mod bands;
 mod board;
 mod dsp;
+mod fonts;
+mod gfx;
 mod lcd;
 mod net;
 mod settings;
@@ -263,6 +265,7 @@ fn main() -> anyhow::Result<()> {
                         if !band_popup && !settings_open {
                             ui::clear_band_popup(&mut fb);
                             ui.redraw_all();
+                            scale_for = None;
                         }
                         swallow = true;
                     }
@@ -270,14 +273,28 @@ fn main() -> anyhow::Result<()> {
                 }
                 Some(Some(_)) if swallow => pressed = true,
                 Some(Some((x, y))) => {
-                    if (y as usize) >= ui::SPEC_Y {
+                    if (ui::SPEC_Y..ui::WF_Y + ui::WF_H).contains(&(y as usize)) {
                         if dial.is_some() {
                             drag_x = Some(x);
                             ui.set_cursor(Some(x as usize));
                         }
                     } else if !pressed {
-                        if let (Some(m), Some(c)) =
-                            (ui::mode_button_at(x as i32, y as i32), cat.as_ref())
+                        if let Some(k) = ui::key_at(x as i32, y as i32) {
+                            info!("Tuş: {k:?}");
+                            match k {
+                                ui::Key::Band if dial.is_some() => {
+                                    band_popup = true;
+                                    ui::draw_band_popup(&mut fb, dial.and_then(bands::band_of));
+                                }
+                                ui::Key::Display => {
+                                    settings_open = true;
+                                    ui.set_spectrum_hidden(true);
+                                    ui::draw_settings(&mut fb, &ui.settings());
+                                }
+                                _ => {}
+                            }
+                        } else if let (Some(m), Some(c)) =
+                            (ui::mode_chip_at(x as i32, y as i32), cat.as_ref())
                         {
                             let code = match m {
                                 "LSB" => 1,
@@ -377,7 +394,7 @@ fn main() -> anyhow::Result<()> {
                 (None, _, _) => ("waiting for QMX".to_string(), false),
                 (Some(_), false, _) => ("no I/Q stream".to_string(), false),
                 (Some(_), true, false) => ("IQ mode OFF".to_string(), false),
-                (Some(_), true, true) => (format!("IQ {:.1}k", s.rate / 1000.0), true),
+                (Some(_), true, true) => (format!("IQ {:.1} kHz", s.rate / 1000.0), true),
             };
             let ota = net::OTA.load(std::sync::atomic::Ordering::Relaxed);
             let (status, ok) = if (1..=101).contains(&ota) {
@@ -387,14 +404,28 @@ fn main() -> anyhow::Result<()> {
             };
             let st = net::STATUS.lock().unwrap().clone();
             let net_line = match st.mode {
-                net::Mode::Station => format!("WiFi {}", st.ip),
-                net::Mode::SetupAp => format!("Setup: WiFi {} -> {}", st.ssid, st.ip),
+                net::Mode::Station => st.ip.clone(),
+                net::Mode::SetupAp => format!("Setup: {} -> {}", st.ssid, st.ip),
                 net::Mode::Connecting => format!("WiFi {}...", st.ssid),
                 net::Mode::Off => String::new(),
             };
             let cal = net::CAL_TENTHS.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
-            let sm = if ok && s.running && iq_on { smeter.map(|v| v + cal) } else { None };
-            ui.header(&mut fb, dial, &mode, &status, ok, &net_line, sm);
+            ui.set_cal(cal);
+            let sm = if ok && s.running && iq_on {
+                smeter.map(|v| (v + cal).round() as i32)
+            } else {
+                None
+            };
+            let hdr = ui::Hdr {
+                dial,
+                mode: mode.clone(),
+                bw: fw,
+                status,
+                ok,
+                net: net_line,
+                smeter: sm,
+            };
+            ui.header(&mut fb, &hdr);
         }
 
         if perf_t.elapsed() >= Duration::from_secs(10) {

@@ -51,19 +51,30 @@ pub fn init() -> anyhow::Result<Framebuffer> {
         esp!(x::esp_lcd_rgb_panel_get_frame_buffer(panel, 1, &mut fb as *mut *mut c_void))?;
         Ok(Framebuffer {
             buf: core::slice::from_raw_parts_mut(fb as *mut u16, W * H),
+            h: H,
         })
     }
 }
 
 /// Doğrudan ekranın gösterdiği bellek: buraya yazılan anında görünür.
+/// Aynı yapı, ekran dışı çizim katmanları için de (genişlik W, yükseklik h) kullanılır.
 pub struct Framebuffer {
     pub buf: &'static mut [u16],
+    pub h: usize,
 }
 
 impl Framebuffer {
+    /// Ekran dışı bir katman: W × h piksel, ömür boyu ayrılır
+    pub fn layer(h: usize, fill: u16) -> Self {
+        Self {
+            buf: Box::leak(vec![fill; W * h].into_boxed_slice()),
+            h,
+        }
+    }
+
     #[inline]
     pub fn put(&mut self, x: usize, y: usize, c: Rgb565) {
-        if x < W && y < H {
+        if x < W && y < self.h {
             self.buf[y * W + x] = c.into_storage();
         }
     }
@@ -71,7 +82,7 @@ impl Framebuffer {
 
 impl OriginDimensions for Framebuffer {
     fn size(&self) -> Size {
-        Size::new(W as u32, H as u32)
+        Size::new(W as u32, self.h as u32)
     }
 }
 

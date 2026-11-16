@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>QMXPan Ekran Tasarımı</title>
+<style>
+:root{--bg:#eef1f6;--card:#fff;--line:#d9dee8;--tx:#1d2433;--mu:#556079}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0d1117;--card:#161b22;--line:#30363d;--tx:#e6edf3;--mu:#8b949e}}
+:root[data-theme="dark"]{--bg:#0d1117;--card:#161b22;--line:#30363d;--tx:#e6edf3;--mu:#8b949e}
+body{margin:0;background:var(--bg);font-family:"Segoe UI",system-ui,sans-serif;color:var(--tx);padding:24px 16px}
+h1{font-size:22px;font-weight:600;text-align:center;margin:0 0 6px}
+p.lead{text-align:center;color:var(--mu);margin:0 0 20px;font-size:14px}
+.grid{display:grid;gap:24px;max-width:840px;margin:0 auto}
+.scr{background:var(--card);border-radius:12px;padding:12px;border:1px solid var(--line)}
+canvas{display:block;width:100%;height:auto;border-radius:8px;background:#000}
+.cap{font-size:14px;color:var(--mu);margin:10px 4px 0;line-height:1.5}
+.cap b{color:var(--tx)}
+.ctl{display:flex;gap:8px;justify-content:center;margin-top:10px;flex-wrap:wrap}
+button{font:inherit;font-size:13px;padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--tx);cursor:pointer}
+</style>
+</head>
+<body>
+<h1>QMXPan · 800×480 ekran tasarımı</h1>
+<p class="lead">QRP DDS renk dili: koyu lacivert zemin, yuvarlak paneller, camgöbeği/kehribar vurgular, yumuşatılmış (AA) fontlar</p>
+<div class="grid">
+  <div class="scr">
+    <canvas id="a" width="1600" height="960"></canvas>
+    <div class="ctl"><button data-m="0">LSB</button><button data-m="1">USB</button><button data-m="2">CW</button><button data-m="3">DIGI</button><button id="pal">Palet değiştir</button></div>
+    <p class="cap"><b>A · Panelli düzen.</b> Üstte büyük frekans, band kartı ve S-metre kartı; altında mod ve bilgi çipleri. Spektrum yuvarlak bir panelde, dB etiketli. Altta QRP DDS'teki gibi dokunmatik tuş çubuğu (BAND, ZOOM, DISPLAY…), yani gizli dokunma yerleri yok. Şelale daha kısa (124 satır), bu da kaydırma maliyetini düşürür.</p>
+  </div>
+  <div class="scr">
+    <canvas id="b" width="1600" height="960"></canvas>
+    <p class="cap"><b>B · Geniş şelale düzeni.</b> Aynı renk dili, ama tuş çubuğu yok; bilgiler tek bir üst bantta toplanıyor ve şelale daha uzun (176 satır). Band ve ayarlar frekansa ya da sağ üstteki ☰ simgesine dokunarak açılır.</p>
+  </div>
+</div>
+<script>
+const C={bg:'#0a1020',pn:'#141d30',pn2:'#1d2a44',ln:'#2a3a58',tx:'#e8eef8',mu:'#8494b2',cy:'#22d3ee',am:'#fbbf24',gr:'#34d399',rd:'#f87171'};
+const SF='"Source Sans Pro","Source Sans 3","Segoe UI",system-ui,sans-serif';
+const MODES=['LSB','USB','CW','DIGI'];
+let mode=3, pal=0;
+const DIAL=14074000, LO=DIAL-12000, HZ=60;
+
+// Tekrarlanabilir sözde rastgele sayı
+let seed=7;const rnd=()=>{seed=(seed*16807)%2147483647;return seed/2147483647;};
+// Benzetim spektrumu (dBFS, 800 sütun): gürültü + FT8 kümesi + CW + SSB tümseği
+function makeSpec(){
+  seed=7;const s=[];
+  for(let x=0;x<800;x++){
+    const f=LO+(x-400)*HZ;let v=-124+rnd()*5;
+    const add=(c,w,a)=>{const d=(f-c)/w;v=Math.max(v,-124+a*Math.exp(-d*d));};
+    [14074450,14074900,14075300,14075800,14076200,14076650].forEach((c,i)=>add(c,25,18+((i*7)%11)));
+    add(14070050,15,30);add(14066400,12,22);add(14081500,1100,9);add(14083200,14,26);
+    if(Math.abs(f-LO)<700){v=NaN;}
+    s.push(v);
+  }
+  return s;
+}
+const PALS=[
+  [[0,[0,0,0]],[.15,[0,0,.35]],[.35,[0,.25,.85]],[.55,[0,.85,.85]],[.72,[1,.95,0]],[.88,[1,.15,0]],[1,[1,1,1]]],
+  [[0,[0,0,0]],[.4,[.35,.12,0]],[.75,[1,.6,0]],[1,[1,1,.7]]],
+  [[0,[.04,.06,.13]],[.5,[.13,.83,.93]],[1,[1,1,1]]],
+];
+function palColor(t){
+  const st=PALS[pal];let k=0;while(k<st.length-2&&t>st[k+1][0])k++;
+  const [t0,c0]=st[k],[t1,c1]=st[k+1],f=Math.min(1,Math.max(0,(t-t0)/(t1-t0)));
+  return c0.map((a,i)=>Math.round((a+(c1[i]-a)*f)*255));
+}
+function rr(g,x,y,w,h,r,fill,stroke){g.beginPath();g.roundRect(x,y,w,h,r);if(fill){g.fillStyle=fill;g.fill();}if(stroke){g.strokeStyle=stroke;g.lineWidth=1;g.stroke();}}
+function T(g,x,y,size,txt,col,align='left',w=600){g.font=`${w} ${size}px ${SF}`;g.fillStyle=col;g.textAlign=align;g.textBaseline='alphabetic';g.fillText(txt,x,y);}
+const fmt=f=>{const m=Math.floor(f/1e6),k=String(Math.floor(f/1e3)%1000).padStart(3,'0'),h=String(f%1000).padStart(3,'0');return[`${m}.${k}`,`.${h}`];};
+
+function passband(){const pb=[[-2700,0],[0,2700],[-150,150],[0,2700]][mode];return pb.map(h=>400+(12000+h)/HZ);}
+
+function spectrum(g,x0,y0,w,h,spec,labels){
+  rr(g,x0,y0,w,h,8,'#0c1424');
+  const range=70,bottom=-134;
+  const Y=v=>y0+h-6-((v-bottom)/range)*(h-12);
+  g.save();g.beginPath();g.roundRect(x0,y0,w,h,8);g.clip();
+  // ızgara
+  g.strokeStyle=C.ln;g.lineWidth=.6;
+  for(let d=-120;d<=-60;d+=10){const y=Y(d);g.beginPath();g.moveTo(x0,y);g.lineTo(x0+w,y);g.stroke();
+    if(labels)T(g,x0+6,y-3,10,String(d),C.mu,'left',400);}
+  for(let k=-24;k<=24;k+=5){}
+  // geçiş bandı
+  const [p0,p1]=passband();const X=x=>x0+x*w/800;
+  g.fillStyle='rgba(251,191,36,0.13)';g.fillRect(X(p0),y0,X(p1)-X(p0),h);
+  g.strokeStyle='rgba(251,191,36,0.55)';g.lineWidth=1;
+  [p0,p1].forEach(p=>{g.beginPath();g.moveTo(X(p),y0);g.lineTo(X(p),y0+h);g.stroke();});
+  // LO bölgesi: taralı, "veri yok"
+  const l0=X(400-12),l1=X(400+12);g.fillStyle='#111a2c';g.fillRect(l0,y0,l1-l0,h);
+  g.strokeStyle='#26324a';g.lineWidth=1;for(let yy=y0-20;yy<y0+h;yy+=6){g.beginPath();g.moveTo(l0,yy+10);g.lineTo(l1,yy);g.stroke();}
+  T(g,(l0+l1)/2,y0+14,9,'LO',C.mu,'center',600);
+  // iz: dolgu + çizgi
+  const pts=spec.map((v,i)=>[X(i),isNaN(v)?null:Y(v)]);
+  g.fillStyle='rgba(34,211,238,0.14)';g.beginPath();let on=false;
+  pts.forEach(([x,y])=>{if(y===null){if(on){g.lineTo(x,y0+h);g.closePath();g.fill();g.beginPath();on=false;}return;}
+    if(!on){g.moveTo(x,y0+h);on=true;}g.lineTo(x,y);});
+  if(on){g.lineTo(x0+w,y0+h);g.closePath();g.fill();}
+  g.strokeStyle=C.cy;g.lineWidth=1.4;g.beginPath();on=false;
+  pts.forEach(([x,y])=>{if(y===null){on=false;return;}if(!on){g.moveTo(x,y);on=true;}else g.lineTo(x,y);});g.stroke();
+  // ayar işareti
+  const dx=X(600);g.strokeStyle=C.am;g.lineWidth=1.5;g.setLineDash([4,3]);g.beginPath();g.moveTo(dx,y0+18);g.lineTo(dx,y0+h);g.stroke();g.setLineDash([]);
+  rr(g,dx-30,y0+3,60,15,7,C.am);T(g,dx,y0+14,10,'14.074.000',C.bg,'center',700);
+  g.restore();
+}
+function scale(g,x0,y0,w){
+  for(let f=Math.ceil((LO-24000)/1000)*1000;f<=LO+24000;f+=1000){
+    const x=x0+(400+(f-LO)/HZ)*w/800,maj=f%5000===0;
+    g.fillStyle=C.mu;g.fillRect(x,y0,1,maj?6:3);
+    if(maj)T(g,x,y0+17,10,(f/1e6).toFixed(3),C.mu,'center',400);
+  }
+}
+function waterfall(g,x0,y0,w,h,spec){
+  // putImageData dönüşümü yok sayar: tuval 2x olduğu için aygıt pikseliyle çiz
+  const S=2,W2=w*S,H2=h*S,img=g.createImageData(W2,H2);seed=99;
+  for(let r=0;r<h;r++)for(let i=0;i<w;i++){
+    const x=Math.floor(i*800/w);let v=spec[x],c;
+    if(isNaN(v))c=[14,22,38];
+    else{
+      // FT8 sinyalleri 15 sn'lik dilimlerde
+      const f=LO+(x-400)*HZ;if(f>14074200&&f<14077000&&((r/22|0)%2))v=-124+rnd()*5;
+      v+=(rnd()-.5)*4;c=palColor(Math.min(1,Math.max(0,(v+131)/36)));
+    }
+    for(let dy=0;dy<S;dy++)for(let dx=0;dx<S;dx++){const o=((r*S+dy)*W2+i*S+dx)*4;img.data.set([c[0],c[1],c[2],255],o);}
+  }
+  g.putImageData(img,x0*S,y0*S);
+}
+function smeter(g,x,y,w,h){
+  rr(g,x,y,w,h,8,C.pn);
+  T(g,x+14,y+22,11,'SİNYAL',C.mu,'left',600);
+  T(g,x+14,y+56,32,'S7',C.tx,'left',700);
+  T(g,x+72,y+56,14,'−85 dBm',C.mu,'left',400);
+  const n=22,sx=x+150,sw=w-164,cw=sw/n;
+  for(let i=0;i<n;i++){const lit=i<14;const c=i<15?C.gr:C.rd;rr(g,sx+i*cw,y+34,cw-2,14,2,lit?c:C.ln);}
+  ['1','3','5','7','9','+20','+40'].forEach((t,i)=>T(g,sx+[0,3,6,9,12,17,21][i]*cw+cw/2,y+64,10,t,C.mu,'center',400));
+}
+function bandCard(g,x,y,w,h){
+  rr(g,x,y,w,h,8,C.pn);T(g,x+w/2,y+38,28,'20m',C.am,'center',700);T(g,x+w/2,y+58,11,'FT8',C.gr,'center',600);
+}
+function chips(g,x,y){
+  MODES.forEach((m,i)=>{const cx=x+i*62;const sel=i===mode;rr(g,cx,y,56,26,13,sel?C.cy:C.pn2);T(g,cx+28,y+18,13,m,sel?'#04212a':C.tx,'center',700);});
+  const chip=(cx,w,l,v,c)=>{rr(g,cx,y,w,26,13,C.pn);T(g,cx+12,y+18,11,l,C.mu,'left',600);T(g,cx+w-12,y+18,13,v,c,'right',700);};
+  chip(x+256,112,'BW',mode===2?'300 Hz':'2.7 kHz',C.cy);chip(x+376,112,'SPAN','48 kHz',C.tx);chip(x+496,124,'AGC','QMX',C.tx);
+}
+function topbar(g,full){
+  g.fillStyle=C.pn;g.fillRect(0,0,800,30);
+  T(g,12,20,15,'QMXPan',C.cy,'left',700);T(g,82,20,14,full?'PANADAPTER':'',C.tx,'left',600);
+  g.fillStyle=C.gr;g.beginPath();g.arc(560,15,4,0,7);g.fill();T(g,570,20,12,'IQ 48 kHz',C.tx,'left',600);
+  // WiFi simgesi
+  g.strokeStyle=C.mu;g.lineWidth=1.6;[9,6,3].forEach(r=>{g.beginPath();g.arc(664,21,r,-2.4,-0.74);g.stroke();});
+  T(g,676,20,12,'192.168.1.62',C.mu,'left',400);
+}
+function bigFreq(g,x,y,big,small){
+  const [a,b]=fmt(DIAL);T(g,x,y,big,a,C.tx,'left',700);g.font=`700 ${big}px ${SF}`;const w=g.measureText(a).width;
+  T(g,x+w,y,small,b,C.tx,'left',600);g.font=`600 ${small}px ${SF}`;const w2=g.measureText(b).width;T(g,x+w+w2+6,y,14,'MHz',C.mu,'left',600);
+}
+function keys(g,y,labels,act){labels.forEach((l,i)=>{const x=8+i*131.5;rr(g,x,y,125,30,7,i===act?C.cy:C.pn2);T(g,x+62,y+20,13,l,i===act?'#04212a':C.tx,'center',700);});}
+
+function drawA(){
+  const cv=document.getElementById('a'),g=cv.getContext('2d');g.setTransform(2,0,0,2,0,0);
+  const spec=makeSpec();g.fillStyle=C.bg;g.fillRect(0,0,800,480);
+  topbar(g,true);
+  T(g,14,52,11,'VFO A · CAT',C.mu,'left',600);
+  bigFreq(g,12,100,56,36);
+  bandCard(g,330,38,96,70);smeter(g,434,38,358,70);
+  chips(g,12,116);
+  spectrum(g,8,150,784,140,spec,true);
+  scale(g,8,292,784);
+  waterfall(g,8,312,784,124,spec);
+  keys(g,442,['BAND','ZOOM','DISPLAY','MEM','WIFI','MENU'],-1);
+}
+function drawB(){
+  const cv=document.getElementById('b'),g=cv.getContext('2d');g.setTransform(2,0,0,2,0,0);
+  const spec=makeSpec();g.fillStyle=C.bg;g.fillRect(0,0,800,480);
+  // tek üst bant
+  g.fillStyle=C.pn;g.fillRect(0,0,800,64);
+  bigFreq(g,12,48,44,28);
+  rr(g,232,14,46,22,11,C.pn2);T(g,255,30,12,'20m',C.am,'center',700);
+  MODES.forEach((m,i)=>{const cx=286+i*52;const sel=i===mode;rr(g,cx,14,48,22,11,sel?C.cy:C.pn2);T(g,cx+24,30,12,m,sel?'#04212a':C.tx,'center',700);});
+  T(g,232,56,10,'BW 2.7 kHz · SPAN 48 kHz',C.mu,'left',400);
+  // S-metre
+  T(g,500,34,24,'S7',C.tx,'left',700);T(g,540,32,12,'−85 dBm',C.mu,'left',400);
+  for(let i=0;i<22;i++)rr(g,500+i*9.5,42,7.5,10,2,i<14?(i<15?C.gr:C.rd):C.ln);
+  g.fillStyle=C.gr;g.beginPath();g.arc(730,24,4,0,7);g.fill();T(g,740,28,12,'IQ 48k',C.tx,'left',600);
+  T(g,788,52,10,'192.168.1.62',C.mu,'right',400);
+  // menü simgesi
+  g.fillStyle=C.mu;[0,6,12].forEach(d=>g.fillRect(708,40+d,14,2));
+  spectrum(g,6,70,788,164,spec,true);
+  scale(g,6,236,788);
+  waterfall(g,6,256,788,218,spec);
+}
+function draw(){drawA();drawB();}
+document.fonts && document.fonts.ready.then(draw);draw();
+document.querySelectorAll('[data-m]').forEach(b=>b.onclick=()=>{mode=+b.dataset.m;draw();});
+document.getElementById('pal').onclick=()=>{pal=(pal+1)%PALS.length;draw();};
+</script>
+</body>
+</html>

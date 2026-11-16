@@ -29,6 +29,24 @@ pub fn band_of(f: u64) -> Option<usize> {
     BANDS.iter().position(|b| f >= b.lo && f <= b.hi)
 }
 
+/// Band kartında gösterilen bölüm adı (IARU R1 bant planına kabaca göre)
+pub fn segment(f: u64) -> &'static str {
+    let Some(i) = band_of(f) else { return "out of band" };
+    let b = &BANDS[i];
+    if f.abs_diff(b.default) <= 3_000 {
+        return "FT8";
+    }
+    // CW bölümünün üst sınırı (kHz)
+    let cw_top = [1_838, 3_570, 5_354, 7_040, 10_150, 14_070, 18_095, 21_070, 24_915, 28_070, 50_100][i] * 1000;
+    if i == 4 {
+        "CW · DIGI"
+    } else if f < cw_top {
+        "CW"
+    } else {
+        "SSB"
+    }
+}
+
 /// Band başına son kullanılan frekans, NVS'de saklanır.
 pub struct Memory {
     nvs: Option<EspNvs<NvsDefault>>,
