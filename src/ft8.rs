@@ -77,34 +77,48 @@ fn hhmmss(t: f64) -> String {
     format!("{:02}{:02}{:02}", s / 3600, (s / 60) % 60, s % 60)
 }
 
+/// Çözücüye giden iş: bir dilimin sesi ve dilim adı
+type Job = (Vec<f32>, String);
+
 pub fn start() {
-    let (tx, rx) = sync_channel::<(Vec<f32>, f64)>(256);
+    let (tx, rx) = sync_channel::<(Vec<f32>, f64)>(64);
     let _ = TX.set(tx);
-    let r = std::thread::Builder::new()
-        .name("ft8".into())
-        // monitor_process yığında ~30 KB dizi kullanıyor
-        .stack_size(48 * 1024)
-        .spawn(move || run(rx));
-    if let Err(e) = r {
-        warn!("FT8 görevi başlatılamadı: {e}");
+    let (jtx, jrx) = sync_channel::<Job>(1);
+    use esp_idf_svc::hal::cpu::Core;
+    // Toplayıcı hiç beklememeli (öncelik 4); çözücü saniyeler sürer, düşük
+    // öncelikte boşta kalan zamanı kullanır. monitor_process yığında ~30 KB ister.
+    let r1 = crate::task::spawn(c"ft8_rx", 8 * 1024, 4, Core::Core1, move || collect(rx, jtx));
+    let r2 = crate::task::spawn(c"ft8_dec", 48 * 1024, 2, Core::Core1, move || decoder(jrx));
+    if let Err(e) = r1.and(r2) {
+        warn!("FT8 görevleri başlatılamadı: {e}");
     }
 }
 
-fn run(rx: Receiver<(Vec<f32>, f64)>) {
+/// Çözücü görevi: dilimleri sırayla çözer; öz testi de burada çalışır
+fn decoder(jobs: Receiver<Job>) {
     if unsafe { c::ft8w_init(200.0, 3000.0) } != 0 {
         warn!("FT8 çözücü başlatılamadı (bellek?)");
         return;
     }
     let block = unsafe { c::ft8w_block_size() } as usize;
     info!("FT8 çözücü hazır (blok {block} örnek)");
+    loop {
+        if SELFTEST.swap(false, Ordering::SeqCst) {
+            selftest(block);
+        }
+        if let Ok((audio, slot)) = jobs.recv_timeout(Duration::from_millis(200)) {
+            decode(&audio, block, &slot);
+        }
+    }
+}
+
+/// Toplayıcı görevi: sesi UTC dilimlerine böler, biten dilimi çözücüye verir
+fn collect(rx: Receiver<(Vec<f32>, f64)>, jobs: SyncSender<Job>) {
     let mut buf: Vec<f32> = Vec::with_capacity(RATE * 15);
     let mut cur_slot: Option<i64> = None;
     let mut valid = false;
 
     loop {
-        if SELFTEST.swap(false, Ordering::SeqCst) {
-            selftest(block);
-        }
         let (chunk, t_end) = match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(v) => v,
             Err(_) => continue,
@@ -122,10 +136,13 @@ fn run(rx: Receiver<(Vec<f32>, f64)>) {
         let t_start = t_end - chunk.len() as f64 / RATE as f64;
         let slot = (t_start / SLOT).floor() as i64;
         if cur_slot != Some(slot) {
-            // Önceki dilimi çöz
+            // Biten dilimi çözücüye ver (çözücü hâlâ meşgulse bu dilim atlanır)
             if let Some(s) = cur_slot {
                 if valid && buf.len() as f64 >= MIN_AUDIO_S * RATE as f64 {
-                    decode(&buf, block, &hhmmss(s as f64 * SLOT));
+                    let full = core::mem::replace(&mut buf, Vec::with_capacity(RATE * 15));
+                    if jobs.try_send((full, hhmmss(s as f64 * SLOT))).is_err() {
+                        warn!("FT8: çözücü meşgul, dilim atlandı");
+                    }
                 }
             }
             buf.clear();

@@ -281,10 +281,10 @@ impl IqStream {
             let st = stop.clone();
             let hu = h as usize;
             stats.lock().unwrap().format = format;
-            std::thread::Builder::new()
-                .name("iq_read".into())
-                .stack_size(8192)
-                .spawn(move || reader(hu, ch as usize, sub as usize, st, stats))?;
+            // Çekirdek 1, yüksek öncelik: ses akışı hiç beklememeli
+            crate::task::spawn(c"iq_read", 12 * 1024, 6, esp_idf_svc::hal::cpu::Core::Core1, move || {
+                reader(hu, ch as usize, sub as usize, st, stats)
+            })?;
             Ok(Self { h: hu, stop })
         }
     }
@@ -321,7 +321,8 @@ fn reader(h: usize, ch: usize, sub: usize, stop: Arc<AtomicBool>, stats: Arc<Mut
     let mut an = crate::dsp::Analyzer::new();
     // CW: ayar frekansındaki sinyal → 700 Hz ton, 6 kHz (±900 Hz pencere)
     let mut cw_demod = crate::audio::Demod::new(12_000.0, 900.0, 8, 700.0, 100.0);
-    let mut cw_dec = crate::cw::Decoder::new(700.0, true, 5);
+    // Susturma 6 (~13 dB): bant gürültüsü ve parazitten sahte E/I/T daha az çıksın
+    let mut cw_dec = crate::cw::Decoder::new(700.0, true, 6);
     let mut cw_t = Instant::now();
     // FT8: USB geçiş bandı (ayar + 0..3 kHz) → 12 kHz gerçek ses
     let mut ft8_demod = crate::audio::Demod::new(12_000.0 + 1_500.0, 1_700.0, 4, 1_500.0, 0.05);
@@ -362,9 +363,10 @@ fn reader(h: usize, ch: usize, sub: usize, stop: Arc<AtomicBool>, stats: Arc<Mut
             n += 1;
         }
         // FT8 sesini (zaman damgasıyla) çözücü görevine gönder
-        if ft8_on && ft8_buf.len() >= 120 {
+        // 50 ms'lik parçalar (kuyrukta 64 parça = 3.2 sn tampon)
+        if ft8_on && ft8_buf.len() >= 600 {
             crate::ft8::feed(core::mem::take(&mut ft8_buf), crate::ft8::now_unix());
-            ft8_buf.reserve(256);
+            ft8_buf.reserve(700);
         }
         // CW çözücü çıktısını ve durumunu ~10 kez/s paylaş
         if cw_on && cw_t.elapsed() >= Duration::from_millis(100) {

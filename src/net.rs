@@ -51,6 +51,9 @@ pub static STATUS: Mutex<Status> = Mutex::new(Status {
 
 /// OTA ilerlemesi: 0 = yok, 1..=100 = yazılıyor, 101 = bitti
 pub static OTA: AtomicU8 = AtomicU8::new(0);
+/// Ekran başarımı (ana döngü her 10 sn'de yazar; /api/ft8 ile okunur)
+pub static PERF: Mutex<String> = Mutex::new(String::new());
+
 /// Ana döngüye "QMX'i bırak ve yeniden başlat" isteği
 pub static RESTART: AtomicBool = AtomicBool::new(false);
 
@@ -347,8 +350,12 @@ fn http_server(nvs: std::sync::Arc<Mutex<EspNvs<NvsDefault>>>) -> Result<EspHttp
     server.fn_handler("/api/ft8", Method::Get, |req| -> Result<()> {
         let st = crate::ft8::STATUS.lock().unwrap().clone();
         let mut out = format!(
-            "time_ok {} last_slot {} count {} decode_ms {}\n",
-            st.time_ok, st.last_slot, st.count, st.decode_ms
+            "perf {}\ntime_ok {} last_slot {} count {} decode_ms {}\n",
+            PERF.lock().unwrap(),
+            st.time_ok,
+            st.last_slot,
+            st.count,
+            st.decode_ms
         );
         for m in crate::ft8::MSGS.lock().unwrap().iter() {
             out.push_str(&format!("{} {:+3} {:+4.1} {:4.0} {}\n", m.slot, m.snr, m.dt, m.freq, m.text));

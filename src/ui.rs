@@ -253,6 +253,9 @@ pub struct Ui {
     last: Hdr,
     /// Şelalenin o anki yüksekliği (metin paneli açıksa kısalır)
     wf_h: usize,
+    // CW ve FT8 panelleri için ekran dışı katmanlar
+    cw_layer: Framebuffer,
+    ft8_layer: Framebuffer,
     /// CAL ofseti (dB): ızgara etiketleri dBm gösterir
     pub cal: f32,
     t_spec_us: u64,
@@ -290,6 +293,8 @@ impl Ui {
             over_for: None,
             last: Hdr::default(),
             wf_h: WF_H,
+            cw_layer: Framebuffer::layer(PANEL_H, th::BG),
+            ft8_layer: Framebuffer::layer(WF_H, th::BG),
             cal: 0.0,
             t_spec_us: 0,
             t_wf_us: 0,
@@ -474,8 +479,10 @@ impl Ui {
     }
 
     /// FT8 listesi: başlık satırı ve en yeni mesajlar (en yeni üstte)
-    pub fn draw_ft8_panel(&self, fb: &mut Framebuffer, msgs: &[crate::ft8::Msg], st: &crate::ft8::Status, mycall: &str) {
-        let y0 = WF_Y as i32;
+    pub fn draw_ft8_panel(&mut self, out: &mut Framebuffer, msgs: &[crate::ft8::Msg], st: &crate::ft8::Status, mycall: &str) {
+        // Ekran dışı katmanda hazırlanır, tek seferde kopyalanır (titreme olmasın)
+        let fb = &mut self.ft8_layer;
+        let y0 = 0;
         let h = WF_H as i32;
         gfx::fill(fb, 0, y0, W as i32, h, th::BG);
         rrect(fb, 4, y0 + 2, W as i32 - 8, h - 4, 8, th::PN);
@@ -520,11 +527,14 @@ impl Ui {
             text_r(fb, &F_R14, 200, y, &format!("{:.0}", m.freq), base);
             text(fb, &F_B14, 214, y, &m.text, msg_c);
         }
+        blit(out, &self.ft8_layer, WF_Y);
     }
 
     /// CW paneli: durum satırı ve çözülen metnin son kısmı (sağdan akar).
-    pub fn draw_cw_panel(&self, fb: &mut Framebuffer, txt: &str, st: &crate::cw::Stat, dial: Option<u64>) {
-        let y = (WF_Y + WF_H - PANEL_H) as i32 + 2;
+    pub fn draw_cw_panel(&mut self, out: &mut Framebuffer, txt: &str, st: &crate::cw::Stat, dial: Option<u64>) {
+        // Ekran dışı katmanda hazırlanır, tek seferde kopyalanır (titreme olmasın)
+        let fb = &mut self.cw_layer;
+        let y = 2;
         let h = PANEL_H as i32 - 4;
         gfx::fill(fb, 0, y - 2, W as i32, h + 4, th::BG);
         rrect(fb, 4, y, W as i32 - 8, h, 8, th::PN);
@@ -552,6 +562,7 @@ impl Ui {
             start = i;
         }
         text_r(fb, &F_B16, W as i32 - 18, y + 30, &txt[start..], th::TX);
+        blit(out, &self.cw_layer, WF_Y + WF_H - PANEL_H);
     }
 
     // ------------------------------------------------------------- ölçek
@@ -922,6 +933,12 @@ impl Ui {
             };
         }
     }
+}
+
+/// Bir katmanı ekranın `y` satırından başlayarak kopyalar.
+fn blit(fb: &mut Framebuffer, layer: &Framebuffer, y: usize) {
+    let n = layer.h.min(fb.h.saturating_sub(y)) * W;
+    fb.buf[y * W..y * W + n].copy_from_slice(&layer.buf[..n]);
 }
 
 /// Şelaleyi yatayda `shift` piksel kaydırır (+ sağa), açılan yeri siyah yapar.

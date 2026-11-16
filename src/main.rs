@@ -16,6 +16,7 @@ mod gfx;
 mod lcd;
 mod net;
 mod settings;
+mod task;
 mod touch;
 mod ui;
 mod usb;
@@ -35,6 +36,10 @@ fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     info!("QMXPan {} başlıyor", env!("CARGO_PKG_VERSION"));
+
+    // Ana döngü (ekran/dokunma/CAT) varsayılan 1 önceliğinde kalırsa öncelik
+    // 5'teki her iş parçacığı onu bekletir; 4'e çıkar
+    unsafe { esp_idf_svc::sys::vTaskPrioritySet(core::ptr::null_mut(), 4) };
 
     let p = Peripherals::take()?;
     let mut i2c = I2cDriver::new(
@@ -105,6 +110,8 @@ fn main() -> anyhow::Result<()> {
     let mut frames = 0u32;
     let mut draw_us = 0u64;
     let mut perf_t = Instant::now();
+    let mut loop_t = Instant::now();
+    let mut max_gap_ms = 0u32;
     let boot = Instant::now();
     let mut last_peaks = Instant::now();
 
@@ -483,19 +490,26 @@ fn main() -> anyhow::Result<()> {
         if perf_t.elapsed() >= Duration::from_secs(10) {
             if frames > 0 {
                 let (spec_ms, wf_ms, lines) = ui.take_timing();
-                info!(
-                    "Ekran: {:.1} kare/s, kare ort. {:.1} ms (spektrum {:.1} ms, şelale satırı {:.1} ms)",
+                let line = format!(
+                    "{:.1} fps, frame {:.1} ms (spectrum {:.1}, wf line {:.1}), max loop gap {} ms",
                     frames as f32 / perf_t.elapsed().as_secs_f32(),
                     draw_us as f32 / frames as f32 / 1000.0,
                     spec_ms / frames as f32,
-                    wf_ms / lines.max(1) as f32
+                    wf_ms / lines.max(1) as f32,
+                    max_gap_ms
                 );
+                info!("Ekran: {line}");
+                *net::PERF.lock().unwrap() = line;
             }
             frames = 0;
             draw_us = 0;
+            max_gap_ms = 0;
             perf_t = Instant::now();
         }
         FreeRtos::delay_ms(5);
+        // Döngünün en uzun duraklaması (takılma ölçüsü)
+        max_gap_ms = max_gap_ms.max(loop_t.elapsed().as_millis() as u32);
+        loop_t = Instant::now();
     }
 }
 
