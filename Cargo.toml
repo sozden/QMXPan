@@ -28,6 +28,14 @@ embedded-graphics = "0.8"
 [build-dependencies]
 embuild = "0.33"
 
+# QMX'ten gelen I/Q sesi (USB Audio Class host)
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/usb_host_uac", version = "^1" }
+
+# QMX'in CAT seri portu (USB CDC-ACM host)
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/usb_host_cdc_acm", version = "^2" }
+
 # RGB LCD, PSRAM ve önbellek işlevleri için ek C bağlantıları (esp_idf_svc::sys::extra)
 [[package.metadata.esp-idf-sys.extra_components]]
 bindings_header = "src/extra_bindings.h"

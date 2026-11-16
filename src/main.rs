@@ -1,29 +1,31 @@
-//! QMXPan — 1. adım: ekran ve dokunmatik testi.
+//! QMXPan — 2. adım: QMX USB testi.
 //!
-//! Ekrana renk çubukları, renk geçişleri ve ızgara çizer; dokunulan yere
-//! sarı nokta koyar ve koordinatı hem ekrana hem seri porta yazar.
-//! Sağ üstteki "CLEAR" kutusuna dokunmak ekranı yeniden çizer.
+//! Kart USB host olur; QMX takılınca ses (I/Q) arayüzünü açar, örnek hızını
+//! ve I/Q seviyelerini ölçer, CAT portundan saniyede bir "FA;" gönderip
+//! yanıtı ekrana yazar. Ayrıntılı tanımlayıcı dökümü seri porta gider.
 
 mod board;
 mod lcd;
 mod touch;
+mod usb;
+
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use embedded_graphics::mono_font::ascii::FONT_10X20;
 use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{Circle, PrimitiveStyle, Rectangle};
+use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::Text;
 use esp_idf_svc::hal::delay::FreeRtos;
 use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::units::Hertz;
-use esp_idf_svc::sys::extra as x;
-use log::info;
+use log::{info, warn};
 
-use lcd::{Framebuffer, H, W};
-
-const CLEAR_BOX: Rectangle = Rectangle::new(Point::new(680, 430), Size::new(110, 40));
+use lcd::{Framebuffer, W};
+use usb::{Cat, Ev, IqStats, IqStream};
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -37,47 +39,110 @@ fn main() -> anyhow::Result<()> {
         p.pins.gpio9,
         &I2cConfig::new().baudrate(Hertz(400_000)),
     )?;
-
     let mut exp = board::Expander::init(&mut i2c)?;
-    info!("CH422G hazır (USB_SEL = USB portu)");
     board::reset_touch(&mut i2c, &mut exp, p.pins.gpio4.into())?;
-    let mut tp = touch::Gt911::probe(&mut i2c);
-
+    let _tp = touch::Gt911::probe(&mut i2c);
     let mut fb = lcd::init()?;
-    let (psram, psram_free) = unsafe {
-        (
-            x::esp_psram_get_size(),
-            x::heap_caps_get_free_size(x::MALLOC_CAP_SPIRAM),
-        )
-    };
-    info!(
-        "Ekran hazır. PSRAM: {} KB, boş {} KB",
-        psram / 1024,
-        psram_free / 1024
-    );
+    fb.buf.fill(0);
+    text(&mut fb, "QMXPan - QMX USB test", 14, 30, Rgb565::WHITE);
 
-    draw_test_screen(&mut fb, psram / 1024, tp.is_some());
+    let events = usb::start()?;
+    let stats = Arc::new(Mutex::new(IqStats::default()));
 
-    let mut last: Option<(u16, u16)> = None;
+    let mut dev: Option<(u16, u16)> = None;
+    let mut iq: Option<IqStream> = None;
+    let mut cat: Option<Cat> = None;
+    let mut audio_ifaces: Vec<u8> = Vec::new();
+    let mut cat_retry: Option<Instant> = None;
+    let mut last_fa = Instant::now();
+    let mut last_draw = Instant::now() - Duration::from_secs(1);
+    let boot = Instant::now();
+
     loop {
-        if let Some(t) = tp.as_mut() {
-            if let Some((tx, ty)) = t.read(&mut i2c) {
-                let pt = Point::new(tx as i32, ty as i32);
-                if CLEAR_BOX.contains(pt) {
-                    draw_test_screen(&mut fb, psram / 1024, true);
-                } else {
-                    let _ = Circle::with_center(pt, 9)
-                        .into_styled(PrimitiveStyle::with_fill(Rgb565::YELLOW))
-                        .draw(&mut fb);
-                    show_touch(&mut fb, tx, ty);
+        while let Ok(ev) = events.try_recv() {
+            match ev {
+                Ev::NewDev(vid, pid) => {
+                    info!("USB aygıtı takıldı: {vid:04X}:{pid:04X}");
+                    dev = Some((vid, pid));
+                    // Ses sürücüsü arayüzleri bildirsin diye biraz bekleyip CAT'i ara
+                    cat_retry = Some(Instant::now() + Duration::from_millis(1500));
                 }
-                if last != Some((tx, ty)) {
-                    info!("Dokunma: x={tx} y={ty}");
-                    last = Some((tx, ty));
+                Ev::UacRx { addr, iface } => {
+                    info!("Ses giriş arayüzü: adres {addr}, arayüz {iface}");
+                    audio_ifaces.push(iface);
+                    match IqStream::open(addr, iface, stats.clone()) {
+                        Ok(s) => iq = Some(s),
+                        Err(e) => warn!("I/Q akışı açılamadı: {e}"),
+                    }
+                }
+                Ev::UacGone(h) => {
+                    if iq.as_ref().is_some_and(|s| s.handle() == h) {
+                        iq.take().unwrap().close();
+                    }
+                    info!("Ses arayüzü çıkarıldı");
+                    *stats.lock().unwrap() = IqStats::default();
+                    audio_ifaces.clear();
+                    dev = None;
+                }
+                Ev::CdcGone(h) => {
+                    if cat.as_ref().is_some_and(|c| c.handle() == h) {
+                        cat.take().unwrap().close();
+                    }
+                    info!("CAT portu çıkarıldı");
+                    usb::CAT_RX.lock().unwrap().clear();
                 }
             }
         }
-        FreeRtos::delay_ms(15);
+
+        // CAT portunu bul: ses arayüzü olmayan ilk CDC arayüzü
+        if cat.is_none() && cat_retry.is_some_and(|t| Instant::now() >= t) {
+            cat_retry = None;
+            for iface in 0..8u8 {
+                if audio_ifaces.contains(&iface) {
+                    continue;
+                }
+                match Cat::open(iface) {
+                    Ok(c) => {
+                        info!("CAT portu açıldı: arayüz {iface}");
+                        // I/Q modunu aç (yalnız bu oturum için; QMX kapanınca normale döner)
+                        let _ = c.send("Q9 1;");
+                        FreeRtos::delay_ms(200);
+                        let _ = c.send("Q9;");
+                        cat = Some(c);
+                        break;
+                    }
+                    Err(e) => info!("Arayüz {iface} CDC değil ({e})"),
+                }
+            }
+        }
+
+        if let Some(c) = cat.as_ref() {
+            if last_fa.elapsed() >= Duration::from_secs(1) {
+                last_fa = Instant::now();
+                if let Err(e) = c.send("FA;") {
+                    warn!("CAT gönderilemedi: {e}");
+                }
+                info!(
+                    "CAT: {} {}",
+                    last_cat_reply("FA").unwrap_or_default(),
+                    last_cat_reply("Q9").unwrap_or_default()
+                );
+            }
+        }
+
+        if last_draw.elapsed() >= Duration::from_millis(500) {
+            last_draw = Instant::now();
+            let s = stats.lock().unwrap().clone();
+            draw_status(&mut fb, dev, &s, cat.as_ref().map(|c| c.iface));
+            // Kart QMX bağlıyken resetlenirse QMX'in USB'si takılı kalıyor;
+            // kablo çıkarmak yetmiyor, QMX'in kapatılıp açılması gerekiyor
+            if dev.is_none() && boot.elapsed() > Duration::from_secs(5) {
+                line(&mut fb, 8, "No QMX? If it is plugged in, power-cycle the QMX.", Rgb565::CSS_ORANGE);
+            } else {
+                line(&mut fb, 8, "", Rgb565::BLACK);
+            }
+        }
+        FreeRtos::delay_ms(20);
     }
 }
 
@@ -85,85 +150,63 @@ fn text(fb: &mut Framebuffer, s: &str, x: i32, y: i32, c: Rgb565) {
     let _ = Text::new(s, Point::new(x, y), MonoTextStyle::new(&FONT_10X20, c)).draw(fb);
 }
 
-fn show_touch(fb: &mut Framebuffer, tx: u16, ty: u16) {
-    let _ = Rectangle::new(Point::new(10, 432), Size::new(300, 30))
+fn line(fb: &mut Framebuffer, row: i32, s: &str, c: Rgb565) {
+    let y = 70 + row * 36;
+    let _ = Rectangle::new(Point::new(0, y - 22), Size::new(W as u32, 32))
         .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
         .draw(fb);
-    text(fb, &format!("Touch: x={tx:3} y={ty:3}"), 14, 455, Rgb565::YELLOW);
+    text(fb, s, 14, y, c);
 }
 
-fn draw_test_screen(fb: &mut Framebuffer, psram_kb: usize, touch_ok: bool) {
-    fb.buf.fill(0);
+/// CAT'ten gelen, verilen önekle başlayan son yanıt (ör. "FA" → "FA00014074000;")
+fn last_cat_reply(prefix: &str) -> Option<String> {
+    let rx = usb::CAT_RX.lock().unwrap();
+    rx.split(';')
+        .map(str::trim)
+        .filter(|r| r.starts_with(prefix))
+        .last()
+        .map(|r| format!("{r};"))
+}
 
-    // 1) Sekiz düz renk çubuğu (üst 80 piksel)
-    let bars = [
-        Rgb565::WHITE,
-        Rgb565::YELLOW,
-        Rgb565::CYAN,
-        Rgb565::GREEN,
-        Rgb565::MAGENTA,
-        Rgb565::RED,
-        Rgb565::BLUE,
-        Rgb565::new(8, 16, 8),
-    ];
-    for (i, c) in bars.iter().enumerate() {
-        let _ = Rectangle::new(Point::new(i as i32 * 100, 0), Size::new(100, 80))
-            .into_styled(PrimitiveStyle::with_fill(*c))
-            .draw(fb);
+fn draw_status(fb: &mut Framebuffer, dev: Option<(u16, u16)>, s: &IqStats, cat: Option<u8>) {
+    let ok = Rgb565::GREEN;
+    let bad = Rgb565::CSS_ORANGE;
+    match dev {
+        Some((v, p)) => line(fb, 0, &format!("USB device: {v:04X}:{p:04X}"), ok),
+        None => line(fb, 0, "USB device: waiting for QMX...", bad),
     }
-
-    // 2) Kırmızı, yeşil, mavi ve gri geçişleri: veri hattı hatası varsa
-    //    geçişte basamak/renk atlaması görünür
-    for x in 0..W {
-        let r = (x * 32 / W) as u8;
-        let g = (x * 64 / W) as u8;
-        for y in 0..30 {
-            fb.put(x, 90 + y, Rgb565::new(r, 0, 0));
-            fb.put(x, 125 + y, Rgb565::new(0, g, 0));
-            fb.put(x, 160 + y, Rgb565::new(0, 0, r));
-            fb.put(x, 195 + y, Rgb565::new(r, g, r));
-        }
+    if s.format.is_empty() {
+        line(fb, 1, "Audio: -", bad);
+    } else {
+        line(fb, 1, &format!("Audio: {}", s.format), ok);
     }
-
-    // 3) 50 piksellik ızgara ve beyaz çerçeve (kenarlar tam görünmeli)
-    let grid = Rgb565::new(6, 12, 6);
-    for y in (240..H).step_by(50) {
-        for x in 0..W {
-            fb.put(x, y, grid);
-        }
-    }
-    for x in (0..W).step_by(50) {
-        for y in 240..H {
-            fb.put(x, y, grid);
-        }
-    }
-    let _ = Rectangle::new(Point::zero(), Size::new(W as u32, H as u32))
-        .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
-        .draw(fb);
-
-    // 4) Bilgi yazıları
-    text(fb, "QMXPan - display & touch test", 14, 270, Rgb565::WHITE);
-    text(
-        fb,
-        &format!("800x480 RGB565   PSRAM: {psram_kb} KB"),
-        14,
-        300,
-        Rgb565::CSS_LIGHT_GRAY,
-    );
-    text(
-        fb,
-        if touch_ok {
-            "Touch: GT911 OK - draw on the screen"
+    if s.running {
+        line(fb, 2, &format!("Stream: {:.0} frames/s", s.rate), ok);
+        line(
+            fb,
+            3,
+            &format!("Level: I {:.1} dBFS   Q {:.1} dBFS", s.i_dbfs, s.q_dbfs),
+            Rgb565::WHITE,
+        );
+        let (msg, c) = if s.corr.abs() > 0.95 {
+            ("L = R : plain audio, not I/Q?", bad)
         } else {
-            "Touch: GT911 NOT FOUND"
-        },
-        14,
-        330,
-        if touch_ok { Rgb565::GREEN } else { Rgb565::RED },
-    );
-
-    let _ = CLEAR_BOX
-        .into_styled(PrimitiveStyle::with_stroke(Rgb565::CYAN, 2))
-        .draw(fb);
-    text(fb, "CLEAR", 710, 457, Rgb565::CYAN);
+            ("I and Q differ : looks like I/Q", ok)
+        };
+        line(fb, 4, &format!("Corr {:+.2}  {msg}", s.corr), c);
+    } else {
+        line(fb, 2, "Stream: -", bad);
+        line(fb, 3, "", Rgb565::WHITE);
+        line(fb, 4, "", Rgb565::WHITE);
+    }
+    match (cat, last_cat_reply("FA")) {
+        (Some(i), Some(r)) => line(fb, 5, &format!("CAT (if {i}): {r}"), ok),
+        (Some(i), None) => line(fb, 5, &format!("CAT (if {i}): no reply yet"), bad),
+        _ => line(fb, 5, "CAT: -", bad),
+    }
+    match last_cat_reply("Q9") {
+        Some(r) if r == "Q91;" || r == "Q9 1;" => line(fb, 6, &format!("IQ mode: ON ({r})"), ok),
+        Some(r) => line(fb, 6, &format!("IQ mode: OFF ({r})"), bad),
+        None => line(fb, 6, "IQ mode: unknown", bad),
+    }
 }
