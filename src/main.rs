@@ -1,16 +1,17 @@
-//! QMXPan — QMX/QMX+ için panadapter (3. adım: spektrum + şelale).
+//! QMXPan — QMX/QMX+ için panadapter.
 //!
 //! Kart USB host olur; QMX'in I/Q sesini alır, FFT ile spektrum ve şelale
 //! çizer. CAT ile frekans/mod okunur; spektruma ya da şelaleye dokunmak
-//! QMX'i o frekansa ayarlar.
+//! QMX'i o frekansa ayarlar. CW çözücü ve FT8 alma da vardır.
 
 mod audio;
 mod bands;
 mod board;
 mod cw;
 mod dsp;
-mod morse;
 mod fonts;
+mod ft8;
+mod morse;
 mod gfx;
 mod lcd;
 mod net;
@@ -53,9 +54,11 @@ fn main() -> anyhow::Result<()> {
     let set_store = settings::Store::new(nvs_part.clone());
     ui.apply_settings(set_store.load());
     let mut settings_open = false;
-    // CW çözücü: açık mı, panelde en son çizilen (metin, durum)
-    let mut cw_on = false;
+    // Şelale alanındaki panel (CW metni / FT8 listesi) ve en son çizilen içerik
+    let mut panel = ui::Panel::None;
     let mut cw_drawn: Option<(String, cw::Stat, Option<u64>)> = None;
+    let mut ft8_drawn: Option<(u32, bool)> = None;
+    ft8::start();
     // Ayar değişince NVS'ye hemen değil, 2 sn sonra bir kez yazılır
     let mut settings_dirty: Option<Instant> = None;
     net::start(
@@ -273,6 +276,11 @@ fn main() -> anyhow::Result<()> {
                             ui.redraw_all();
                             scale_for = None;
                             cw_drawn = None;
+                            ft8_drawn = None;
+                            // Pencere şelale alanını sildi: panel düzenini yeniden kur
+                            let p = panel;
+                            ui.set_panel(&mut fb, ui::Panel::None);
+                            ui.set_panel(&mut fb, p);
                         }
                         swallow = true;
                     }
@@ -298,15 +306,24 @@ fn main() -> anyhow::Result<()> {
                                     ui.set_spectrum_hidden(true);
                                     ui::draw_settings(&mut fb, &ui.settings());
                                 }
-                                ui::Key::Cw => {
-                                    cw_on = !cw_on;
-                                    cw::ON.store(cw_on, std::sync::atomic::Ordering::Relaxed);
-                                    if cw_on {
+                                ui::Key::Cw | ui::Key::Ft8 => {
+                                    // CW ve FT8 aynı anda açık olmaz
+                                    let want = if panel == k_panel(k) { ui::Panel::None } else { k_panel(k) };
+                                    panel = want;
+                                    cw::ON.store(want == ui::Panel::Cw, std::sync::atomic::Ordering::Relaxed);
+                                    ft8::ON.store(want == ui::Panel::Ft8, std::sync::atomic::Ordering::Relaxed);
+                                    if want == ui::Panel::Cw {
                                         cw::TEXT.lock().unwrap().clear();
                                     }
-                                    ui.set_text_panel(&mut fb, cw_on);
-                                    ui.draw_keys(&mut fb, if cw_on { &[ui::Key::Cw] } else { &[] });
+                                    ui.set_panel(&mut fb, want);
+                                    let active: &[ui::Key] = match want {
+                                        ui::Panel::Cw => &[ui::Key::Cw],
+                                        ui::Panel::Ft8 => &[ui::Key::Ft8],
+                                        ui::Panel::None => &[],
+                                    };
+                                    ui.draw_keys(&mut fb, active);
                                     cw_drawn = None;
+                                    ft8_drawn = None;
                                 }
                                 _ => {}
                             }
@@ -393,11 +410,21 @@ fn main() -> anyhow::Result<()> {
             scale_for = Some(dial);
         }
         // CW paneli: metin ya da durum değiştiyse yeniden çiz
-        if cw_on && !band_popup {
+        if panel == ui::Panel::Cw && !band_popup {
             let now = (cw::TEXT.lock().unwrap().clone(), *cw::STAT.lock().unwrap(), dial);
             if cw_drawn.as_ref() != Some(&now) {
                 ui.draw_cw_panel(&mut fb, &now.0, &now.1, now.2);
                 cw_drawn = Some(now);
+            }
+        }
+        // FT8 listesi: yeni çözüm geldiyse ya da saat durumu değiştiyse
+        if panel == ui::Panel::Ft8 && !band_popup {
+            let st = ft8::STATUS.lock().unwrap().clone();
+            let now = (ft8::GEN.load(std::sync::atomic::Ordering::SeqCst), st.time_ok);
+            if ft8_drawn != Some(now) {
+                let msgs = ft8::MSGS.lock().unwrap().clone();
+                ui.draw_ft8_panel(&mut fb, &msgs, &st, MYCALL);
+                ft8_drawn = Some(now);
             }
         }
         if settings_dirty.is_some_and(|t| t.elapsed() >= Duration::from_secs(2)) {
@@ -469,6 +496,17 @@ fn main() -> anyhow::Result<()> {
             perf_t = Instant::now();
         }
         FreeRtos::delay_ms(5);
+    }
+}
+
+/// FT8 listesinde vurgulanan çağrı işareti
+const MYCALL: &str = "TA4SO";
+
+fn k_panel(k: ui::Key) -> ui::Panel {
+    match k {
+        ui::Key::Cw => ui::Panel::Cw,
+        ui::Key::Ft8 => ui::Panel::Ft8,
+        _ => ui::Panel::None,
     }
 }
 

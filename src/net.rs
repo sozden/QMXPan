@@ -145,6 +145,21 @@ fn run(modem: Modem<'static>, sysloop: EspSystemEventLoop, part: EspDefaultNvsPa
     }
 
     let _server = http_server(nvs)?;
+    // FT8 için UTC saati (15 sn dilimleri saniyenin altında doğru olmalı)
+    let _sntp = if connected {
+        match esp_idf_svc::sntp::EspSntp::new_default() {
+            Ok(s) => {
+                info!("SNTP başlatıldı");
+                Some(s)
+            }
+            Err(e) => {
+                warn!("SNTP başlatılamadı: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Bağlantıyı izle, koparsa yeniden bağlan
     loop {
@@ -327,6 +342,27 @@ fn http_server(nvs: std::sync::Arc<Mutex<EspNvs<NvsDefault>>>) -> Result<EspHttp
             Ok(())
         })?;
     }
+
+    // Son FT8 çözümleri (düz metin)
+    server.fn_handler("/api/ft8", Method::Get, |req| -> Result<()> {
+        let st = crate::ft8::STATUS.lock().unwrap().clone();
+        let mut out = format!(
+            "time_ok {} last_slot {} count {} decode_ms {}\n",
+            st.time_ok, st.last_slot, st.count, st.decode_ms
+        );
+        for m in crate::ft8::MSGS.lock().unwrap().iter() {
+            out.push_str(&format!("{} {:+3} {:+4.1} {:4.0} {}\n", m.slot, m.snr, m.dt, m.freq, m.text));
+        }
+        req.into_ok_response()?.write_all(out.as_bytes())?;
+        Ok(())
+    })?;
+
+    // Gömülü test kaydıyla FT8 çözücüyü dener (sonuç ekranda ve kayıtta)
+    server.fn_handler("/api/ft8test", Method::Post, |req| -> Result<()> {
+        crate::ft8::SELFTEST.store(true, Ordering::SeqCst);
+        req.into_ok_response()?.write_all(b"FT8 self-test started\n")?;
+        Ok(())
+    })?;
 
     server.fn_handler("/api/restart", Method::Post, |req| -> Result<()> {
         req.into_ok_response()?.write_all(b"restarting\n")?;

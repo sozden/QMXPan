@@ -323,8 +323,12 @@ fn reader(h: usize, ch: usize, sub: usize, stop: Arc<AtomicBool>, stats: Arc<Mut
     let mut cw_demod = crate::audio::Demod::new(12_000.0, 900.0, 8, 700.0, 100.0);
     let mut cw_dec = crate::cw::Decoder::new(700.0, true, 5);
     let mut cw_t = Instant::now();
+    // FT8: USB geçiş bandı (ayar + 0..3 kHz) → 12 kHz gerçek ses
+    let mut ft8_demod = crate::audio::Demod::new(12_000.0 + 1_500.0, 1_700.0, 4, 1_500.0, 0.05);
+    let mut ft8_buf: Vec<f32> = Vec::with_capacity(256);
     while !stop.load(Ordering::SeqCst) {
         let cw_on = crate::cw::ON.load(Ordering::Relaxed);
+        let ft8_on = crate::ft8::ON.load(Ordering::Relaxed);
         let mut got: u32 = 0;
         let r = unsafe {
             x::uac_host_device_read(
@@ -347,10 +351,20 @@ fn reader(h: usize, ch: usize, sub: usize, stop: Arc<AtomicBool>, stats: Arc<Mut
                     cw_dec.push(a);
                 }
             }
+            if ft8_on {
+                if let Some(a) = ft8_demod.push(i as f32, q as f32) {
+                    ft8_buf.push(a);
+                }
+            }
             si += i * i;
             sq += q * q;
             siq += i * q;
             n += 1;
+        }
+        // FT8 sesini (zaman damgasıyla) çözücü görevine gönder
+        if ft8_on && ft8_buf.len() >= 120 {
+            crate::ft8::feed(core::mem::take(&mut ft8_buf), crate::ft8::now_unix());
+            ft8_buf.reserve(256);
         }
         // CW çözücü çıktısını ve durumunu ~10 kez/s paylaş
         if cw_on && cw_t.elapsed() >= Duration::from_millis(100) {

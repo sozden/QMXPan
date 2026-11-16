@@ -1,6 +1,6 @@
 [package]
 name = "qmxpan"
-version = "0.6.0"
+version = "0.7.0"
 authors = ["Şadan Özden"]
 edition = "2021"
 resolver = "2"
@@ -37,6 +37,12 @@ remote_component = { name = "espressif/usb_host_uac", version = "^1" }
 # QMX'in CAT seri portu (USB CDC-ACM host)
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "espressif/usb_host_cdc_acm", version = "^2" }
+
+# FT8 çözücü: ft8_lib (MIT, kgoba) + QMXPan sarmalayıcısı (esp_idf_svc::sys::ft8)
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/ft8w"]
+bindings_header = "components/ft8w/ft8w.h"
+bindings_module = "ft8"
 
 # RGB LCD, PSRAM ve önbellek işlevleri için ek C bağlantıları (esp_idf_svc::sys::extra)
 [[package.metadata.esp-idf-sys.extra_components]]

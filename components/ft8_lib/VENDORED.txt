@@ -1,0 +1,3 @@
+kgoba/ft8_lib https://github.com/kgoba/ft8_lib
+commit 9fec6ca39886edbf96f4f5e71edc76da5074e871 (2025-08-23)
+MIT lisansı (LICENSE). Test kayıtları, yardımcı betikler ve PortAudio kodu çıkarıldı.

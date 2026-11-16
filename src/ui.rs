@@ -69,14 +69,21 @@ pub enum Key {
 const KEYS: [(Key, &str, bool); 6] = [
     (Key::Band, "BAND", true),
     (Key::Cw, "CW", true),
-    (Key::Ft8, "FT8", false),
+    (Key::Ft8, "FT8", true),
     (Key::Display, "DISPLAY", true),
     (Key::Wifi, "WIFI", false),
     (Key::Menu, "MENU", false),
 ];
 
-/// Şelalenin altındaki metin paneli (CW / FT8) yüksekliği
+/// Şelalenin altındaki CW metin paneli yüksekliği
 const PANEL_H: usize = 52;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Panel {
+    None,
+    Cw,
+    Ft8,
+}
 
 fn key_x(i: usize) -> i32 {
     8 + (i as i32 * 263) / 2
@@ -448,12 +455,70 @@ impl Ui {
         }
     }
 
-    /// Şelalenin altında metin panelini açar/kapatır (şelale o kadar kısalır).
-    pub fn set_text_panel(&mut self, fb: &mut Framebuffer, on: bool) {
-        let h = if on { WF_H - PANEL_H } else { WF_H };
+    /// Şelale alanındaki paneli seçer: CW metni şelalenin altında küçük bir
+    /// şerittir; FT8 listesi şelalenin yerini tamamen alır.
+    pub fn set_panel(&mut self, fb: &mut Framebuffer, p: Panel) {
+        let h = match p {
+            Panel::None => WF_H,
+            Panel::Cw => WF_H - PANEL_H,
+            Panel::Ft8 => 0,
+        };
         if h != self.wf_h {
             self.wf_h = h;
-            gfx::fill(fb, 0, (WF_Y + h) as i32, W as i32, (WF_H - h) as i32, if on { th::BG } else { 0 });
+            gfx::fill(fb, 0, WF_Y as i32, W as i32, WF_H as i32, if h == WF_H { 0 } else { th::BG });
+            if h > 0 {
+                gfx::fill(fb, 0, WF_Y as i32, W as i32, h as i32, 0);
+            }
+            self.wf_dial = None;
+        }
+    }
+
+    /// FT8 listesi: başlık satırı ve en yeni mesajlar (en yeni üstte)
+    pub fn draw_ft8_panel(&self, fb: &mut Framebuffer, msgs: &[crate::ft8::Msg], st: &crate::ft8::Status, mycall: &str) {
+        let y0 = WF_Y as i32;
+        let h = WF_H as i32;
+        gfx::fill(fb, 0, y0, W as i32, h, th::BG);
+        rrect(fb, 4, y0 + 2, W as i32 - 8, h - 4, 8, th::PN);
+        rrect(fb, 12, y0 + 6, 40, 16, 8, th::AM);
+        text_c(fb, &F_B12, 32, y0 + 18, "FT8", th::ON_AM);
+        let head = if !st.time_ok {
+            "waiting for UTC time (WiFi / SNTP)...".to_string()
+        } else if st.last_slot.is_empty() {
+            "listening - first decode after the next 15 s slot".to_string()
+        } else {
+            format!(
+                "last slot {}:{}:{} UTC · {} decodes · {} ms",
+                &st.last_slot[0..2.min(st.last_slot.len())],
+                st.last_slot.get(2..4).unwrap_or(""),
+                st.last_slot.get(4..6).unwrap_or(""),
+                st.count,
+                st.decode_ms
+            )
+        };
+        text(fb, &F_R11, 62, y0 + 18, &head, th::MU);
+        // Sütun başlıkları
+        let cols = [(14, "UTC"), (78, "dB"), (118, "DT"), (162, "Hz"), (214, "Message")];
+        let hy = y0 + 34;
+        for (x, l) in cols {
+            text(fb, &F_B12, x, hy, l, th::LN);
+        }
+        let row_h = 16;
+        for (i, m) in msgs.iter().take(5).enumerate() {
+            let y = hy + 17 + i as i32 * row_h;
+            let fresh = m.slot == st.last_slot;
+            let base = if fresh { th::TX } else { th::MU };
+            let msg_c = if !mycall.is_empty() && m.text.contains(mycall) {
+                th::AM
+            } else if m.text.starts_with("CQ ") {
+                th::GR
+            } else {
+                base
+            };
+            text(fb, &F_R14, 14, y, &m.slot, base);
+            text_r(fb, &F_R14, 100, y, &format!("{:+}", m.snr), base);
+            text_r(fb, &F_R14, 146, y, &format!("{:.1}", m.dt), base);
+            text_r(fb, &F_R14, 200, y, &format!("{:.0}", m.freq), base);
+            text(fb, &F_B14, 214, y, &m.text, msg_c);
         }
     }
 
@@ -754,7 +819,7 @@ impl Ui {
             self.wf_acc[x] = self.wf_acc[x].max(self.col[x]);
         }
         self.wf_count += 1;
-        if self.wf_count >= self.set.wf_every as u32 {
+        if self.wf_count >= self.set.wf_every as u32 && self.wf_h > 1 {
             let t1 = std::time::Instant::now();
             let acc = core::mem::take(&mut self.wf_acc);
             self.waterfall_line(fb, &acc, dial);
