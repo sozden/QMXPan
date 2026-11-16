@@ -12,6 +12,9 @@ use esp_idf_svc::sys::{esp, extra as x};
 pub const W: usize = 800;
 pub const H: usize = 480;
 
+/// Ekran tamponunun adresi: yalnız ekran görüntüsü almak için okunur
+pub static FB_PTR: core::sync::atomic::AtomicPtr<u16> = core::sync::atomic::AtomicPtr::new(null_mut());
+
 /// Waveshare 4.3" ekranının pinleri ve zamanlaması.
 pub fn init() -> anyhow::Result<Framebuffer> {
     unsafe {
@@ -49,6 +52,7 @@ pub fn init() -> anyhow::Result<Framebuffer> {
 
         let mut fb: *mut c_void = null_mut();
         esp!(x::esp_lcd_rgb_panel_get_frame_buffer(panel, 1, &mut fb as *mut *mut c_void))?;
+        FB_PTR.store(fb as *mut u16, core::sync::atomic::Ordering::SeqCst);
         Ok(Framebuffer {
             buf: core::slice::from_raw_parts_mut(fb as *mut u16, W * H),
             h: H,

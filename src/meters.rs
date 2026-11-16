@@ -12,7 +12,7 @@
 use std::f32::consts::{PI, TAU};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::fonts::{F_B12, F_B14, F_B16, F_R11};
+use crate::fonts::{F_B12, F_B14, F_B16, F_B30, F_R11};
 use crate::gfx::{blend, rgb, text, text_c, text_r, th};
 use crate::lcd::{Framebuffer, H, W};
 
@@ -643,7 +643,7 @@ impl Meter {
 // ------------------------------------------------------------ sayfa
 
 /// Sayfaya her güncellemede verilen değerler
-pub struct Data<'a> {
+pub struct Data {
     pub dial: Option<u64>,
     /// Üst şeritteki bilgi ("40m · CW · 300 Hz")
     pub info: String,
@@ -653,14 +653,12 @@ pub struct Data<'a> {
     /// Gönderirken okunan güç (W) ve SWR
     pub pwr: Option<f32>,
     pub swr: Option<f32>,
-    /// Son spektrum (dB) ve ayar frekansının spektrumdaki yeri (bin)
-    pub spec: Option<(&'a [f32], f32)>,
 }
 
-const STRIP: (i32, i32, i32, i32) = (8, 362, 784, 74);
 const KEY_Y: i32 = 444;
 const KEY_H: i32 = 30;
-const LCD_Y: i32 = 326;
+const LCD_Y: i32 = 358;
+const LCD_H: i32 = 44;
 
 fn key_x(i: usize) -> i32 {
     8 + (i as i32 * 263) / 2
@@ -680,9 +678,7 @@ pub struct Meters {
     swr: Meter,
     sm: Meter,
     pw: Meter,
-    strip: Vec<u16>,
     last_step: Instant,
-    last_strip: Instant,
     shown_info: String,
     shown_tx: Option<bool>,
     shown_lcd: [String; 3],
@@ -702,27 +698,22 @@ impl Meters {
         crate::gfx::fill(&mut base, 0, 0, W as i32, 30, th::PN);
         let x = text(&mut base, &F_B16, 12, 21, "QMXPan", th::CY);
         text(&mut base, &F_B14, x + 12, 20, "METERS", th::TX);
-        text(&mut base, &F_B12, 14, 50, "VFO A", th::MU);
-        text(&mut base, &F_B12, 560, 50, "UTC", th::MU);
+        text(&mut base, &F_B12, 14, 46, "VFO A", th::MU);
+        text(&mut base, &F_B12, 563, 56, "UTC", th::MU);
 
-        let big = Tubes::new(38, 64, 56);
-        let small = Tubes::new(30, 52, 62);
+        let big = Tubes::new(44, 76, 50);
+        let small = Tubes::new(32, 58, 62);
         let (freq, clock) = {
             let mut cv = Cv::of(&mut base);
-            let f = Row::layout(&mut cv, 14, 56, &big, 64, 4, "dd.ddd.ddd");
-            let c = Row::layout(&mut cv, 560, 62, &small, 52, 3, "dd:dd:dd");
+            let f = Row::layout(&mut cv, 14, 50, &big, 76, 4, "dd.ddd.ddd");
+            let c = Row::layout(&mut cv, 563, 62, &small, 58, 3, "dd:dd:dd");
             (f, c)
         };
-        text(&mut base, &F_B14, freq.end(&big) + 8, 116, "MHz", rgb(0xc98a55));
+        text(&mut base, &F_B14, freq.end(&big) + 8, 122, "MHz", rgb(0xc98a55));
 
-        let swr = Meter::new(&mut base, 10, 134, 236, 182, &SWR);
-        let sm = Meter::new(&mut base, 254, 126, 292, 198, &SMETER);
-        let pw = Meter::new(&mut base, 554, 134, 236, 182, &WATTS);
-
-        // Spektrum şeridi çerçevesi
-        let (sx, sy, sw, sh) = STRIP;
-        crate::gfx::rrect(&mut base, sx, sy, sw, sh, 8, rgb(0x2a2010));
-        crate::gfx::rrect(&mut base, sx + 1, sy + 1, sw - 2, sh - 2, 7, rgb(0x0e0b06));
+        let swr = Meter::new(&mut base, 10, 156, 236, 182, &SWR);
+        let sm = Meter::new(&mut base, 254, 146, 292, 202, &SMETER);
+        let pw = Meter::new(&mut base, 554, 156, 236, 182, &WATTS);
         // Tuşlar: panadapter tuşları burada kapalı, yalnız BACK
         for (i, l) in ["BAND", "CW", "FT8", "DISPLAY", "ZOOM", "BACK"].iter().enumerate() {
             let x = key_x(i);
@@ -740,9 +731,7 @@ impl Meters {
             swr,
             sm,
             pw,
-            strip: vec![0; ((sw - 4) * (sh - 4)) as usize],
             last_step: Instant::now(),
-            last_strip: Instant::now(),
             shown_info: String::new(),
             shown_tx: None,
             shown_lcd: Default::default(),
@@ -841,83 +830,37 @@ impl Meters {
             self.swr.draw(&self.base, fb, false);
         }
 
-        // Kehribar LCD okumaları
+        // Kehribar LCD okumaları: solda küçük başlık, sağda büyük değer
         let swr_s = match held {
-            Some((_, s, _)) => format!("SWR {s:.2}"),
-            None => "SWR —".into(),
+            Some((_, s, _)) => (format!("{s:.2}"), String::new()),
+            None => ("—".into(), String::new()),
         };
         let sm_s = match d.dbm {
-            Some(v) => format!("{}   {:.0} dBm", crate::ui::s_units(v), v),
-            None => "—".into(),
+            Some(v) => (crate::ui::s_units(v), format!("{:.0} dBm", v)),
+            None => ("—".into(), String::new()),
         };
         let pw_s = match held {
-            Some((p, _, _)) => format!("{p:.1} W"),
-            None => "— W".into(),
+            Some((p, _, _)) => (format!("{p:.1}"), "W".into()),
+            None => ("—".into(), "W".into()),
         };
-        for (i, (s, x, w)) in [(swr_s, 66, 124), (sm_s, 314, 172), (pw_s, 610, 124)].into_iter().enumerate() {
-            if s != self.shown_lcd[i] {
-                crate::gfx::rrect(fb, x, LCD_Y, w, 26, 5, rgb(0x3a2a12));
-                crate::gfx::rrect(fb, x + 1, LCD_Y + 1, w - 2, 24, 4, rgb(0x1a1206));
-                text_c(fb, &F_B16, x + w / 2, LCD_Y + 19, &s, rgb(0xffb347));
-                self.shown_lcd[i] = s;
+        let boxes = [("SWR", swr_s, 28, 200), ("SIGNAL", sm_s, 272, 256), ("POWER", pw_s, 572, 200)];
+        for (i, (label, (val, small), x, w)) in boxes.into_iter().enumerate() {
+            let key = format!("{val}|{small}");
+            if key == self.shown_lcd[i] {
+                continue;
             }
-        }
-
-        // Spektrum şeridi (en çok 20 kez/sn)
-        if let Some((db, dial_bin)) = d.spec {
-            if self.last_strip.elapsed().as_millis() >= 50 && !db.is_empty() {
-                self.last_strip = Instant::now();
-                self.draw_strip(fb, db, dial_bin);
+            crate::gfx::rrect(fb, x, LCD_Y, w, LCD_H, 6, rgb(0x3a2a12));
+            crate::gfx::rrect(fb, x + 1, LCD_Y + 1, w - 2, LCD_H - 2, 5, rgb(0x1a1206));
+            text(fb, &F_B12, x + 12, LCD_Y + 18, label, rgb(0xa07030));
+            let amber = rgb(0xffb347);
+            let base_y = LCD_Y + 34;
+            let mut right = x + w - 12;
+            if !small.is_empty() {
+                text_r(fb, &F_B16, right, base_y, &small, rgb(0xd08a40));
+                right -= crate::gfx::text_w(&F_B16, &small) + 8;
             }
-        }
-    }
-
-    fn draw_strip(&mut self, fb: &mut Framebuffer, db: &[f32], dial_bin: f32) {
-        let (sx, sy, sw, sh) = STRIP;
-        let (w, h) = (sw - 4, sh - 4);
-        let n = db.len();
-        // Taban: değerlerin %30'luk dilimi
-        let mut tmp: Vec<f32> = db.to_vec();
-        let k = n * 3 / 10;
-        let floor = *tmp.select_nth_unstable_by(k, |a, b| a.total_cmp(b)).1;
-        let lo = floor - 6.0;
-        let range = 60.0;
-        let bg = rgb(0x0e0b06);
-        let fillc = blend(bg, rgb(0xffaa3c), 34);
-        let line = rgb(0xffb347);
-        let dash = rgb(0xff5a2a);
-        let buf = &mut self.strip;
-        buf.fill(bg);
-        let dx = ((dial_bin / n as f32) * w as f32) as i32;
-        let mut prev: Option<i32> = None;
-        for x in 0..w {
-            let a = (x as usize * n) / w as usize;
-            let b = (((x + 1) as usize * n) / w as usize).max(a + 1).min(n);
-            let v = db[a..b].iter().cloned().fold(f32::MIN, f32::max);
-            let t = ((v - lo) / range).clamp(0.0, 1.0);
-            let y = (h - 1) - (t * (h - 2) as f32) as i32;
-            for yy in y..h {
-                buf[(yy * w + x) as usize] = fillc;
-            }
-            let (y0, y1) = match prev {
-                Some(p) => (p.min(y), p.max(y)),
-                None => (y, y),
-            };
-            for yy in y0..=y1 {
-                buf[(yy * w + x) as usize] = line;
-            }
-            prev = Some(y);
-            if x == dx {
-                for yy in 0..h {
-                    if yy % 7 < 4 {
-                        buf[(yy * w + x) as usize] = dash;
-                    }
-                }
-            }
-        }
-        for r in 0..h {
-            let o = (sy + 2 + r) as usize * W + (sx + 2) as usize;
-            fb.buf[o..o + w as usize].copy_from_slice(&buf[(r * w) as usize..((r + 1) * w) as usize]);
+            text_r(fb, &F_B30, right, base_y, &val, amber);
+            self.shown_lcd[i] = key;
         }
     }
 }

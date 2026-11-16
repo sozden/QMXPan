@@ -23,6 +23,8 @@ use crate::settings::Settings;
 // --------------------------------------------------------------- yerleşim
 
 pub const TOP_H: i32 = 30;
+/// Üst şeritteki UTC saatinin yeri
+const UTC_X: i32 = 236;
 const FREQ_Y: i32 = 100;
 const CARD_Y: i32 = 36;
 const CARD_H: i32 = 72;
@@ -266,6 +268,8 @@ pub struct Hdr {
     /// dBm, tam sayıya yuvarlanmış (1 dB değişimde yeniden çizilir)
     pub smeter: Option<i32>,
     pub zoom: u32,
+    /// UTC saati "21:31:17" (saat ayarlı değilse boş)
+    pub utc: String,
 }
 
 pub struct Ui {
@@ -378,6 +382,9 @@ impl Ui {
         let old = core::mem::take(&mut self.last);
         if h.status != old.status || h.ok != old.ok || h.net != old.net {
             self.draw_topbar(fb, &h.status, h.ok, &h.net);
+            self.draw_utc(fb, &h.utc);
+        } else if h.utc != old.utc {
+            self.draw_utc(fb, &h.utc);
         }
         if h.dial != old.dial {
             self.draw_freq(fb, h.dial);
@@ -410,6 +417,15 @@ impl Ui {
         let dot = if ok { th::GR } else { th::AM };
         rrect(fb, sx - 13, 11, 8, 8, 4, dot);
         text(fb, &F_B14, sx, 20, status, th::TX);
+    }
+
+    /// Üst şeritte, başlığın sağında UTC saati
+    fn draw_utc(&self, fb: &mut Framebuffer, utc: &str) {
+        gfx::fill(fb, UTC_X, 0, 128, TOP_H, th::PN);
+        if !utc.is_empty() {
+            let x = text(fb, &F_B12, UTC_X, 20, "UTC", th::MU);
+            text(fb, &F_B16, x + 6, 21, utc, th::AM);
+        }
     }
 
     fn draw_freq(&self, fb: &mut Framebuffer, dial: Option<u64>) {

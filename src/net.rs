@@ -404,6 +404,44 @@ fn http_server(nvs: std::sync::Arc<Mutex<EspNvs<NvsDefault>>>) -> Result<EspHttp
         Ok(())
     })?;
 
+    // Ekran görüntüsü: 800x480 RGB565 BMP (yukarıdan aşağı satırlar)
+    server.fn_handler("/api/screen.bmp", Method::Get, |req| -> Result<()> {
+        use crate::lcd::{FB_PTR, H, W};
+        let p = FB_PTR.load(std::sync::atomic::Ordering::SeqCst);
+        if p.is_null() {
+            req.into_status_response(503)?.write_all(b"no display\n")?;
+            return Ok(());
+        }
+        let data = (W * H * 2) as u32;
+        let mut hdr = Vec::with_capacity(66);
+        hdr.extend_from_slice(b"BM");
+        hdr.extend_from_slice(&(66 + data).to_le_bytes());
+        hdr.extend_from_slice(&0u32.to_le_bytes());
+        hdr.extend_from_slice(&66u32.to_le_bytes());
+        hdr.extend_from_slice(&40u32.to_le_bytes());
+        hdr.extend_from_slice(&(W as i32).to_le_bytes());
+        hdr.extend_from_slice(&(-(H as i32)).to_le_bytes());
+        hdr.extend_from_slice(&1u16.to_le_bytes());
+        hdr.extend_from_slice(&16u16.to_le_bytes());
+        hdr.extend_from_slice(&3u32.to_le_bytes()); // BI_BITFIELDS
+        hdr.extend_from_slice(&data.to_le_bytes());
+        hdr.extend_from_slice(&[0u8; 16]);
+        for m in [0xF800u32, 0x07E0, 0x001F] {
+            hdr.extend_from_slice(&m.to_le_bytes());
+        }
+        let mut resp = req.into_response(200, None, &[("Content-Type", "image/bmp")])?;
+        resp.write_all(&hdr)?;
+        let mut chunk = vec![0u8; W * 2 * 16];
+        for y0 in (0..H).step_by(16) {
+            let src = unsafe { core::slice::from_raw_parts(p.add(y0 * W), W * 16) };
+            for (i, v) in src.iter().enumerate() {
+                chunk[i * 2..i * 2 + 2].copy_from_slice(&v.to_le_bytes());
+            }
+            resp.write_all(&chunk)?;
+        }
+        Ok(())
+    })?;
+
     // Son FT8 çözümleri (düz metin)
     server.fn_handler("/api/ft8", Method::Get, |req| -> Result<()> {
         let st = crate::ft8::STATUS.lock().unwrap().clone();

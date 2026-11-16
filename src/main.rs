@@ -124,7 +124,6 @@ fn main() -> anyhow::Result<()> {
     let mut tx_pwr: Option<f32> = None;
     let mut tx_swr: Option<f32> = None;
     let mut tx_raw: (Option<String>, Option<String>, Option<String>) = (None, None, None);
-    let mut meter_spec: Option<(Vec<f32>, f32)> = None;
 
     // Başarım ölçümü
     let mut frames = 0u32;
@@ -528,10 +527,7 @@ fn main() -> anyhow::Result<()> {
                 .store((v * 10.0) as i32, std::sync::atomic::Ordering::Relaxed);
 
             // Band penceresi ya da METERS açıkken spektrum/şelale çizilmez
-            if meters_open {
-                let dial_bin = db.len() as f32 / 2.0 + (ifh as f32 - center_hz) / bin_hz;
-                meter_spec = Some((db, dial_bin));
-            } else if !band_popup {
+            if !band_popup && !meters_open {
                 let t0 = Instant::now();
                 ui.frame(&mut fb, &mut db, szoom, dial);
                 draw_us += t0.elapsed().as_micros() as u64;
@@ -556,7 +552,6 @@ fn main() -> anyhow::Result<()> {
                     tx: tx_on,
                     pwr: tx_pwr,
                     swr: tx_swr,
-                    spec: meter_spec.as_ref().map(|(d, b)| (d.as_slice(), *b)),
                 };
                 m.update(&mut fb, &data);
             }
@@ -680,6 +675,7 @@ fn main() -> anyhow::Result<()> {
                 net: net_line,
                 smeter: sm,
                 zoom: ui.view().zoom,
+                utc: utc_now(),
             };
             ui.header(&mut fb, &hdr);
         }
@@ -757,6 +753,19 @@ fn log_peaks(db: &[f32], dial: Option<u64>) {
         })
         .collect();
     info!("Tepeler [ayar {:?}, taban {:.0} dBFS]: {}", dial, median, list.join(", "));
+}
+
+/// UTC saati "SS:DD:ss"; SNTP saati henüz ayarlamadıysa boş
+fn utc_now() -> String {
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if t < 1_735_689_600 {
+        return String::new();
+    }
+    let s = t % 86_400;
+    format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
 }
 
 /// cat_value gibi, ama bulunan yanıtları tampondan siler: aynı değer bir
