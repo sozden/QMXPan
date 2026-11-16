@@ -542,8 +542,7 @@ impl Ui {
     /// Zemin katmanı: panel, dB ızgarası ve etiketleri, geçiş bandı, LO bölgesi.
     /// Dolgu katmanı: aynısının üstüne %14 camgöbeği.
     fn build_layers(&mut self) {
-        let bottom = self.bottom;
-        let range = self.set.spec_range as f32;
+        let grid_rows = self.grid_rows();
         let bg = &mut self.bg;
         bg.buf.fill(th::BG);
         rrect(bg, 0, 0, W as i32, SPEC_H as i32, 8, th::SPEC_BG);
@@ -564,22 +563,14 @@ impl Ui {
             }
         }
         text_c(bg, &F_R11, W as i32 / 2, 14, "LO", th::MU);
-        // 10 dB'de bir ızgara çizgisi ve dBm etiketi
-        let to_y = |v: f32| SPEC_H as f32 - 1.0 - (v - bottom) / range * (SPEC_H - 1) as f32;
-        let mut g = (bottom / 10.0).ceil() * 10.0;
-        while g < bottom + range {
-            let y = to_y(g).round() as usize;
-            if (6..SPEC_H - 2).contains(&y) {
-                for x in 0..W {
-                    if !(LO_X0..=LO_X1).contains(&x) {
-                        let i = y * W + x;
-                        bg.buf[i] = blend(bg.buf[i], th::LN, 200);
-                    }
+        // 10 dB'de bir ızgara çizgisi (etiketleri üst katmanda, iz üstlerini örtmesin)
+        for y in grid_rows {
+            for x in 0..W {
+                if !(LO_X0..=LO_X1).contains(&x) {
+                    let i = y * W + x;
+                    bg.buf[i] = blend(bg.buf[i], th::LN, 200);
                 }
-                let dbm = (g + self.cal).round() as i32;
-                text(bg, &F_R11, 6, y as i32 - 3, &format!("{}{}", if dbm < 0 { "−" } else { "" }, dbm.abs()), th::MU);
             }
-            g += 10.0;
         }
         // Geçiş bandı kenarları
         if let Some((p0, p1)) = self.pb {
@@ -595,14 +586,48 @@ impl Ui {
         }
     }
 
-    /// Üst katman: ayar frekansında kesikli kehribar çizgi ve frekans etiketi.
+    /// Izgara çizgilerinin katman içindeki satırları ve dB değerleri (10 dB'de bir)
+    fn grid(&self) -> Vec<(usize, f32)> {
+        let bottom = self.bottom;
+        let range = self.set.spec_range as f32;
+        // draw_spectrum'daki to_y ile aynı ölçek (katman koordinatı)
+        let to_y = |v: f32| (SPEC_H - 3) as f32 - (v - bottom) / range * (SPEC_H - 8) as f32;
+        let mut out = Vec::new();
+        let mut g = (bottom / 10.0).ceil() * 10.0;
+        while g < bottom + range {
+            let y = to_y(g).round();
+            if y >= 6.0 && y < (SPEC_H - 2) as f32 {
+                out.push((y as usize, g));
+            }
+            g += 10.0;
+        }
+        out
+    }
+
+    fn grid_rows(&self) -> Vec<usize> {
+        self.grid().into_iter().map(|(y, _)| y).collect()
+    }
+
+    /// Üst katman: dBm etiketleri (koyu zeminli), ayar frekansında kesikli
+    /// kehribar çizgi ve frekans etiketi. İzin üstünde kalır.
     fn build_overlay(&mut self, dial: Option<u64>) {
         // Eski etiketin kapladığı sütunlar yeniden çizilsin
         for x in DIAL_X as usize - 45..=DIAL_X as usize + 45 {
             self.force[x] = true;
         }
+        let grid = self.grid();
+        let cal = self.cal;
         let o = &mut self.over;
         o.buf.fill(0);
+        for (y, g) in grid {
+            let dbm = (g + cal).round() as i32;
+            let s = format!("{}{}", if dbm < 0 { "−" } else { "" }, dbm.abs());
+            let w = gfx::text_w(&F_R11, &s) + 8;
+            let yy = y as i32;
+            gfx::fill(o, 2, yy - 7, w, 13, th::SPEC_BG);
+            rrect(o, 2, yy - 7, w, 13, 4, th::PN);
+            text(o, &F_R11, 6, yy + 4, &s, th::MU);
+        }
         for y in 20..SPEC_H {
             if y % 7 < 4 {
                 o.buf[y * W + DIAL_X as usize] = th::AM;
@@ -643,19 +668,22 @@ impl Ui {
         self.sorted.sort_unstable_by(|a, b| a.total_cmp(b));
         let nf = self.sorted[W / 5];
         self.floor += (nf - self.floor) * 0.05;
-        // Alt sınır 5 dB adımlarla, histerezisle değişir (ızgara etiketleri oynamasın)
-        let want = ((self.floor - 8.0) / 5.0).floor() * 5.0;
-        if (want - self.bottom).abs() >= 5.0 && (self.floor - 8.0 - self.bottom - 2.5).abs() > 4.0 {
+        // Alt sınır gürültü tabanının ~15 dB altında (iz panelin dibine yapışmasın),
+        // 5 dB adımlarla ve histerezisle değişir (ızgara etiketleri oynamasın)
+        let target = self.floor - 15.0;
+        let want = (target / 5.0).floor() * 5.0;
+        if (want - self.bottom).abs() >= 5.0 && (target - self.bottom - 2.5).abs() > 4.0 {
             self.bottom = want;
         }
 
         let key = (self.bottom as i32, self.pb, self.set.spec_range);
-        if self.layers_for != Some(key) {
+        let layers_changed = self.layers_for != Some(key);
+        if layers_changed {
             self.build_layers();
             self.layers_for = Some(key);
             self.full_redraw = true;
         }
-        if self.over_for != Some(dial.unwrap_or(0)) {
+        if layers_changed || self.over_for != Some(dial.unwrap_or(0)) {
             self.build_overlay(dial);
             self.over_for = Some(dial.unwrap_or(0));
         }

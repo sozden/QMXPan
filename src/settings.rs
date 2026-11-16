@@ -24,7 +24,7 @@ impl Default for Settings {
         Self {
             wf_bright: 0,
             wf_span: 52,
-            spec_range: 70,
+            spec_range: 60,
             wf_every: 2,
             palette: 0,
             smooth: 50,

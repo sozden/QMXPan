@@ -29,7 +29,7 @@ pub mod th {
     pub const LO_BG: u16 = rgb(0x111a2c);
     pub const LO_HATCH: u16 = rgb(0x26324a);
     /// CamgÃ¶beÄŸi zemin Ã¼stÃ¼ndeki koyu yazÄ±
-    pub const ON_CY: u16 = rgb(0x04212a);
+    pub const ON_CY: u16 = rgb(0x00121a);
     /// Kehribar zemin Ã¼stÃ¼ndeki koyu yazÄ±
     pub const ON_AM: u16 = rgb(0x2a1c02);
 }

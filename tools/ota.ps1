@@ -19,7 +19,14 @@ if (-not $DerlemeYok) {
 espflash save-image --chip esp32s3 --flash-size 16mb --partition-table partitions.csv $elf $bin
 if ($LASTEXITCODE -ne 0) { throw "İmaj üretilemedi" }
 
-Write-Host "Yükleniyor: $bin -> http://$Kart/api/ota"
-curl.exe --fail-with-body -sS -X POST --data-binary "@$bin" -H "Content-Type: application/octet-stream" "http://$Kart/api/ota"
-if ($LASTEXITCODE -ne 0) { throw "Yükleme başarısız" }
+# İlk denemede kart 3 MB'lık OTA bölümünü silerken bağlantı bazen sıfırlanıyor;
+# bölüm silindikten sonraki deneme geçiyor. Bu yüzden en çok 3 kez denenir.
+$ok = $false
+for ($i = 1; $i -le 3 -and -not $ok; $i++) {
+    Write-Host "Yükleniyor ($i/3): $bin -> http://$Kart/api/ota"
+    curl.exe --fail-with-body -sS -X POST --data-binary "@$bin" -H "Content-Type: application/octet-stream" "http://$Kart/api/ota"
+    $ok = ($LASTEXITCODE -eq 0)
+    if (-not $ok) { Start-Sleep -Seconds 3 }
+}
+if (-not $ok) { throw "Yükleme başarısız" }
 Write-Host "`nTamam, kart QMX bağlantısını kapatıp yeniden başlıyor."
