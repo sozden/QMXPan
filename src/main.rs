@@ -15,6 +15,7 @@ mod ft8;
 mod morse;
 mod gfx;
 mod lcd;
+mod meters;
 mod net;
 mod settings;
 mod task;
@@ -114,6 +115,16 @@ fn main() -> anyhow::Result<()> {
     let mut cw_offset: u32 = 700;
     let mut last_fw_raw: Option<String> = None;
     let mut last_q9_fix = Instant::now() - Duration::from_secs(10);
+
+    // METERS sayfası (ilk açılışta hazırlanır) ve gönderim okumaları
+    let mut meters: Option<meters::Meters> = None;
+    let mut meters_open = false;
+    let mut last_meter_poll = Instant::now();
+    let mut tx_on = false;
+    let mut tx_pwr: Option<f32> = None;
+    let mut tx_swr: Option<f32> = None;
+    let mut tx_raw: (Option<String>, Option<String>, Option<String>) = (None, None, None);
+    let mut meter_spec: Option<(Vec<f32>, f32)> = None;
 
     // Başarım ölçümü
     let mut frames = 0u32;
@@ -242,6 +253,29 @@ fn main() -> anyhow::Result<()> {
                 last_fw_raw = fw_raw.clone();
             }
             fw = fw_raw.and_then(|v| v.trim().parse::<u32>().ok()).filter(|&w| (50..=10_000).contains(&w));
+
+            // METERS açıkken gönderim durumu, güç ve SWR 5 kez/sn sorulur.
+            // Yanıtlar okununca tampondan silinir: eski değer yeniden okunmasın.
+            if meters_open && last_meter_poll.elapsed() >= Duration::from_millis(200) {
+                last_meter_poll = Instant::now();
+                let _ = c.send("TQ;PC;SW;");
+            }
+            let raw = (cat_take("TQ"), cat_take("PC"), cat_take("SW"));
+            if raw.0.is_some() || raw.1.is_some() || raw.2.is_some() {
+                if raw != tx_raw {
+                    info!("QMX TX yanıtı: TQ {:?} PC {:?} SW {:?}", raw.0, raw.1, raw.2);
+                    tx_raw = raw.clone();
+                }
+                if let Some(t) = &raw.0 {
+                    tx_on = t.trim() == "1";
+                }
+                if let Some(v) = raw.1 {
+                    tx_pwr = v.trim().parse::<f32>().ok().filter(|p| (0.0..=20.0).contains(p));
+                }
+                if let Some(v) = raw.2 {
+                    tx_swr = v.trim().parse::<f32>().ok().filter(|s| *s >= 1.0);
+                }
+            }
         }
         // CW'de QMX, LO'yu CW offset kadar daha aşağı koyar: ayar frekansı
         // ana bantta 12000 + CW offset'tedir (diğer modlarda 12000)
@@ -258,6 +292,21 @@ fn main() -> anyhow::Result<()> {
         // spektrum/şelalede sürükleyip bırakınca ayar
         if let Some(t) = tp.as_mut() {
             match t.poll(&mut i2c) {
+                Some(Some((x, y))) if meters_open => {
+                    if !pressed && meters::back_at(x as i32, y as i32) {
+                        info!("METERS kapandı");
+                        meters_open = false;
+                        ui.repaint(&mut fb);
+                        ui.set_panel(&mut fb, panel);
+                        ui.draw_keys(&mut fb, &keys_active(panel, ft8_mode));
+                        scale_for = None;
+                        cw_drawn = None;
+                        ft8_drawn = None;
+                        last_hdr = Instant::now() - Duration::from_secs(1);
+                        swallow = true;
+                    }
+                    pressed = true;
+                }
                 Some(Some((x, y))) if settings_open => {
                     if !pressed {
                         let mut s = ui.settings();
@@ -342,6 +391,13 @@ fn main() -> anyhow::Result<()> {
                                 ui::Key::Band if dial.is_some() => {
                                     band_popup = true;
                                     ui::draw_band_popup(&mut fb, dial.and_then(bands::band_of));
+                                }
+                                ui::Key::Menu => {
+                                    info!("METERS açıldı");
+                                    meters_open = true;
+                                    ui.suspend();
+                                    meters.get_or_insert_with(meters::Meters::new).enter(&mut fb);
+                                    swallow = true;
                                 }
                                 ui::Key::Display => {
                                     settings_open = true;
@@ -471,8 +527,11 @@ fn main() -> anyhow::Result<()> {
             net::SMETER_DBFS_TENTHS
                 .store((v * 10.0) as i32, std::sync::atomic::Ordering::Relaxed);
 
-            // Band penceresi açıkken spektrum/şelale çizilmez (pencereyi bozmasın)
-            if !band_popup {
+            // Band penceresi ya da METERS açıkken spektrum/şelale çizilmez
+            if meters_open {
+                let dial_bin = db.len() as f32 / 2.0 + (ifh as f32 - center_hz) / bin_hz;
+                meter_spec = Some((db, dial_bin));
+            } else if !band_popup {
                 let t0 = Instant::now();
                 ui.frame(&mut fb, &mut db, szoom, dial);
                 draw_us += t0.elapsed().as_micros() as u64;
@@ -480,12 +539,34 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        if !settings_open && scale_for != Some(dial) {
+        if meters_open {
+            if let Some(m) = meters.as_mut() {
+                let s = stats.lock().unwrap().clone();
+                let cal = net::CAL_TENTHS.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
+                let band = dial.and_then(bands::band_of).map(|i| format!("{}m · ", bands::BANDS[i].name));
+                let bw = match ui::passband(&mode, fw).map(|(a, b)| b - a) {
+                    Some(v) if v >= 1000 => format!(" · {:.1} kHz", v as f32 / 1000.0),
+                    Some(v) => format!(" · {v} Hz"),
+                    None => String::new(),
+                };
+                let data = meters::Data {
+                    dial,
+                    info: format!("{}{}{}", band.unwrap_or_default(), mode, bw),
+                    dbm: smeter.filter(|_| s.running && iq_on).map(|v| v + cal),
+                    tx: tx_on,
+                    pwr: tx_pwr,
+                    swr: tx_swr,
+                    spec: meter_spec.as_ref().map(|(d, b)| (d.as_slice(), *b)),
+                };
+                m.update(&mut fb, &data);
+            }
+        }
+        if !settings_open && !meters_open && scale_for != Some(dial) {
             ui.scale(&mut fb, dial);
             scale_for = Some(dial);
         }
         // CW paneli: metin ya da durum değiştiyse yeniden çiz
-        if panel == ui::Panel::Cw && !band_popup {
+        if panel == ui::Panel::Cw && !band_popup && !meters_open {
             let now = (cw::TEXT.lock().unwrap().clone(), *cw::STAT.lock().unwrap(), dial);
             if cw_drawn.as_ref() != Some(&now) {
                 ui.draw_cw_panel(&mut fb, &now.0, &now.1, now.2);
@@ -494,7 +575,7 @@ fn main() -> anyhow::Result<()> {
         }
         // FT8 listesi: yeni çözüm geldiyse ya da saat durumu değiştiyse
         ft8::DIAL.store(dial.unwrap_or(0) as u32, std::sync::atomic::Ordering::Relaxed);
-        if ft8_mode > 0 && !band_popup {
+        if ft8_mode > 0 && !band_popup && !meters_open {
             let st = ft8::STATUS.lock().unwrap().clone();
             let now = (ft8::GEN.load(std::sync::atomic::Ordering::SeqCst), st.time_ok);
             if ft8_drawn != Some(now) {
@@ -548,7 +629,7 @@ fn main() -> anyhow::Result<()> {
             settings_dirty = None;
         }
 
-        if last_hdr.elapsed() >= Duration::from_millis(200) {
+        if !meters_open && last_hdr.elapsed() >= Duration::from_millis(200) {
             last_hdr = Instant::now();
             let s = stats.lock().unwrap().clone();
             if cat.is_none() {
@@ -676,6 +757,31 @@ fn log_peaks(db: &[f32], dial: Option<u64>) {
         })
         .collect();
     info!("Tepeler [ayar {:?}, taban {:.0} dBFS]: {}", dial, median, list.join(", "));
+}
+
+/// cat_value gibi, ama bulunan yanıtları tampondan siler: aynı değer bir
+/// sonraki soruda eskiden kalma olarak yeniden okunmaz.
+fn cat_take(prefix: &str) -> Option<String> {
+    let mut rx = usb::CAT_RX.lock().unwrap();
+    if !rx.contains(prefix) {
+        return None;
+    }
+    let mut parts: Vec<&str> = rx.split(';').collect();
+    let tail = parts.pop().unwrap_or("");
+    let mut val = None;
+    let mut keep = String::new();
+    for p in parts {
+        let t = p.trim();
+        if t.starts_with(prefix) && t.len() > prefix.len() {
+            val = Some(t[prefix.len()..].to_string());
+        } else {
+            keep.push_str(p);
+            keep.push(';');
+        }
+    }
+    keep.push_str(tail);
+    *rx = keep;
+    val
 }
 
 /// CAT'ten gelen, verilen önekle başlayan son yanıtın değeri (ör. "FA" → "00014074000")

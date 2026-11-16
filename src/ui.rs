@@ -118,7 +118,7 @@ const KEYS: [(Key, &str, bool); 6] = [
     (Key::Ft8, "FT8", true),
     (Key::Display, "DISPLAY", true),
     (Key::Zoom, "ZOOM", true),
-    (Key::Menu, "MENU", false),
+    (Key::Menu, "METERS", true),
 ];
 
 /// Şelalenin altındaki CW metin paneli yüksekliği
@@ -728,6 +728,28 @@ impl Ui {
 
     pub fn redraw_all(&mut self) {
         self.full_redraw = true;
+    }
+
+    /// Başka bir sayfa açılırken: şelale alanına artık çizim yapılmasın
+    /// (görünüm değişse bile clear_waterfall o sayfayı bozmasın).
+    pub fn suspend(&mut self) {
+        self.wf_h = 0;
+    }
+
+    /// Başka bir sayfadan dönünce panadapter ekranını baştan kurar
+    /// (tuşlar ve şelale paneli çağıran tarafta).
+    pub fn repaint(&mut self, fb: &mut Framebuffer) {
+        fb.buf.fill(th::BG);
+        self.last = Hdr::default();
+        self.draw_topbar(fb, "", false, "");
+        self.draw_freq(fb, None);
+        self.draw_band_card(fb, None);
+        self.draw_smeter(fb, None);
+        self.draw_chips(fb, "", None, self.view.zoom);
+        self.last.zoom = self.view.zoom;
+        self.full_redraw = true;
+        self.over_for = None;
+        self.wf_h = usize::MAX;
     }
 
     /// S-metre kalibrasyonu değişince ızgara etiketleri (dBm) yeniden üretilir.
