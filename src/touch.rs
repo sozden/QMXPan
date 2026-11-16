@@ -32,8 +32,8 @@ impl Gt911 {
         None
     }
 
-    /// Basılıysa ilk noktanın (x, y) koordinatını döndürür.
-    pub fn read(&mut self, i2c: &mut I2cDriver) -> Option<(u16, u16)> {
+    /// Yeni ölçüm yoksa `None`; varsa `Some(nokta)` — parmak kalktıysa `Some(None)`.
+    pub fn poll(&mut self, i2c: &mut I2cDriver) -> Option<Option<(u16, u16)>> {
         let mut st = [0u8; 1];
         i2c.write_read(self.addr, &reg(REG_STATUS), &mut st, BLOCK).ok()?;
         if st[0] & 0x80 == 0 {
@@ -52,6 +52,6 @@ impl Gt911 {
         // Durum kaydını temizle ki bir sonraki ölçüm gelsin
         let r = reg(REG_STATUS);
         let _ = i2c.write(self.addr, &[r[0], r[1], 0], BLOCK);
-        pt
+        Some(pt)
     }
 }

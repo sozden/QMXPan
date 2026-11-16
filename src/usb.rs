@@ -308,6 +308,7 @@ fn reader(h: usize, ch: usize, sub: usize, stop: Arc<AtomicBool>, stats: Arc<Mut
     let mut buf = vec![0u8; frame * 480]; // 10 ms
     let (mut n, mut si, mut sq, mut siq) = (0u64, 0f64, 0f64, 0f64);
     let mut t0 = Instant::now();
+    let mut an = crate::dsp::Analyzer::new();
     while !stop.load(Ordering::SeqCst) {
         let mut got: u32 = 0;
         let r = unsafe {
@@ -325,6 +326,7 @@ fn reader(h: usize, ch: usize, sub: usize, stop: Arc<AtomicBool>, stats: Arc<Mut
         for f in buf[..got as usize - got as usize % frame].chunks_exact(frame) {
             let i = sample(&f[..sub], sub) as f64;
             let q = if ch > 1 { sample(&f[sub..2 * sub], sub) as f64 } else { 0.0 };
+            an.push(i as f32, q as f32);
             si += i * i;
             sq += q * q;
             siq += i * q;
@@ -340,7 +342,7 @@ fn reader(h: usize, ch: usize, sub: usize, stop: Arc<AtomicBool>, stats: Arc<Mut
                 s.q_dbfs = db(sq / n as f64);
                 s.corr = (siq / (si * sq).sqrt().max(1e-30)) as f32;
             }
-            info!(
+            log::debug!(
                 "I/Q: {:.0} örnek/s, I {:.1} dBFS, Q {:.1} dBFS, ilinti {:.2}",
                 s.rate, s.i_dbfs, s.q_dbfs, s.corr
             );

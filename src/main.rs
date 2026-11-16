@@ -1,30 +1,25 @@
-//! QMXPan — 2. adım: QMX USB testi.
+//! QMXPan — QMX/QMX+ için panadapter (3. adım: spektrum + şelale).
 //!
-//! Kart USB host olur; QMX takılınca ses (I/Q) arayüzünü açar, örnek hızını
-//! ve I/Q seviyelerini ölçer, CAT portundan saniyede bir "FA;" gönderip
-//! yanıtı ekrana yazar. Ayrıntılı tanımlayıcı dökümü seri porta gider.
+//! Kart USB host olur; QMX'in I/Q sesini alır, FFT ile spektrum ve şelale
+//! çizer. CAT ile frekans/mod okunur; spektruma ya da şelaleye dokunmak
+//! QMX'i o frekansa ayarlar.
 
 mod board;
+mod dsp;
 mod lcd;
 mod touch;
+mod ui;
 mod usb;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use embedded_graphics::mono_font::ascii::FONT_10X20;
-use embedded_graphics::mono_font::MonoTextStyle;
-use embedded_graphics::pixelcolor::Rgb565;
-use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
-use embedded_graphics::text::Text;
 use esp_idf_svc::hal::delay::FreeRtos;
 use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::units::Hertz;
 use log::{info, warn};
 
-use lcd::{Framebuffer, W};
 use usb::{Cat, Ev, IqStats, IqStream};
 
 fn main() -> anyhow::Result<()> {
@@ -41,10 +36,9 @@ fn main() -> anyhow::Result<()> {
     )?;
     let mut exp = board::Expander::init(&mut i2c)?;
     board::reset_touch(&mut i2c, &mut exp, p.pins.gpio4.into())?;
-    let _tp = touch::Gt911::probe(&mut i2c);
+    let mut tp = touch::Gt911::probe(&mut i2c);
     let mut fb = lcd::init()?;
-    fb.buf.fill(0);
-    text(&mut fb, "QMXPan - QMX USB test", 14, 30, Rgb565::WHITE);
+    let mut ui = ui::Ui::new(&mut fb);
 
     let events = usb::start()?;
     let stats = Arc::new(Mutex::new(IqStats::default()));
@@ -54,8 +48,24 @@ fn main() -> anyhow::Result<()> {
     let mut cat: Option<Cat> = None;
     let mut audio_ifaces: Vec<u8> = Vec::new();
     let mut cat_retry: Option<Instant> = None;
-    let mut last_fa = Instant::now();
-    let mut last_draw = Instant::now() - Duration::from_secs(1);
+
+    let mut dial: Option<u64> = None;
+    let mut mode = String::new();
+    let mut last_poll = Instant::now();
+    let mut polls = 0u32;
+    // QMX'ten son okunan I/Q modu (tampon taşınca yanıt kaybolmasın diye saklanır)
+    let mut iq_on = false;
+    let mut last_hdr = Instant::now() - Duration::from_secs(1);
+    let mut scale_for: Option<Option<u64>> = None;
+    let mut last_seq = 0u32;
+    let mut pressed = false;
+    // Kendi gönderdiğimiz FA'dan sonra eski yanıtlar ekranı geri almasın
+    let mut hold_dial_until = Instant::now();
+
+    // Başarım ölçümü
+    let mut frames = 0u32;
+    let mut draw_us = 0u64;
+    let mut perf_t = Instant::now();
     let boot = Instant::now();
 
     loop {
@@ -64,11 +74,9 @@ fn main() -> anyhow::Result<()> {
                 Ev::NewDev(vid, pid) => {
                     info!("USB aygıtı takıldı: {vid:04X}:{pid:04X}");
                     dev = Some((vid, pid));
-                    // Ses sürücüsü arayüzleri bildirsin diye biraz bekleyip CAT'i ara
                     cat_retry = Some(Instant::now() + Duration::from_millis(1500));
                 }
                 Ev::UacRx { addr, iface } => {
-                    info!("Ses giriş arayüzü: adres {addr}, arayüz {iface}");
                     audio_ifaces.push(iface);
                     match IqStream::open(addr, iface, stats.clone()) {
                         Ok(s) => iq = Some(s),
@@ -83,6 +91,7 @@ fn main() -> anyhow::Result<()> {
                     *stats.lock().unwrap() = IqStats::default();
                     audio_ifaces.clear();
                     dev = None;
+                    dial = None;
                 }
                 Ev::CdcGone(h) => {
                     if cat.as_ref().is_some_and(|c| c.handle() == h) {
@@ -94,119 +103,141 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        // CAT portunu bul: ses arayüzü olmayan ilk CDC arayüzü
+        // CAT portunu bul ve I/Q modunu aç
         if cat.is_none() && cat_retry.is_some_and(|t| Instant::now() >= t) {
             cat_retry = None;
-            for iface in 0..8u8 {
-                if audio_ifaces.contains(&iface) {
-                    continue;
-                }
-                match Cat::open(iface) {
-                    Ok(c) => {
-                        info!("CAT portu açıldı: arayüz {iface}");
-                        // I/Q modunu aç (yalnız bu oturum için; QMX kapanınca normale döner)
-                        let _ = c.send("Q9 1;");
-                        FreeRtos::delay_ms(200);
-                        let _ = c.send("Q9;");
-                        cat = Some(c);
-                        break;
-                    }
-                    Err(e) => info!("Arayüz {iface} CDC değil ({e})"),
+            for iface in (0..8u8).filter(|i| !audio_ifaces.contains(i)) {
+                if let Ok(c) = Cat::open(iface) {
+                    info!("CAT portu açıldı: arayüz {iface}");
+                    let _ = c.send("Q9 1;");
+                    FreeRtos::delay_ms(200);
+                    let _ = c.send("Q9;FA;MD;");
+                    cat = Some(c);
+                    break;
                 }
             }
         }
 
+        // Frekans ve modu yarım saniyede bir sor
         if let Some(c) = cat.as_ref() {
-            if last_fa.elapsed() >= Duration::from_secs(1) {
-                last_fa = Instant::now();
-                if let Err(e) = c.send("FA;") {
-                    warn!("CAT gönderilemedi: {e}");
+            if last_poll.elapsed() >= Duration::from_millis(500) {
+                last_poll = Instant::now();
+                polls += 1;
+                // 5 sn'de bir I/Q modunu da doğrula (QMX menüsü ya da MU; kapatabilir)
+                let _ = c.send(if polls % 10 == 0 { "FA;MD;Q9;" } else { "FA;MD;" });
+            }
+            if let Some(q) = cat_value("Q9") {
+                iq_on = q.trim() == "1";
+            }
+            if Instant::now() >= hold_dial_until {
+                if let Some(f) = cat_value("FA").and_then(|v| v.parse::<u64>().ok()) {
+                    dial = Some(f);
                 }
+            }
+            if let Some(m) = cat_value("MD") {
+                mode = mode_name(&m).to_string();
+            }
+        }
+
+        // Dokunarak ayar: parmak değdiği anda o frekansa git
+        if let Some(t) = tp.as_mut() {
+            match t.poll(&mut i2c) {
+                Some(Some((x, y))) => {
+                    if !pressed && (y as usize) >= ui::SPEC_Y {
+                        if let (Some(c), Some(d)) = (cat.as_ref(), dial) {
+                            let snap = if mode.starts_with("CW") { 10 } else { 100 };
+                            let f = (ui::x_to_freq(x as i32, d) + snap / 2) / snap * snap;
+                            info!("Dokunarak ayar: {}", ui::fmt_freq(f));
+                            usb::CAT_RX.lock().unwrap().clear();
+                            let _ = c.send(&format!("FA{f:011};"));
+                            dial = Some(f);
+                            hold_dial_until = Instant::now() + Duration::from_millis(700);
+                        }
+                    }
+                    pressed = true;
+                }
+                Some(None) => pressed = false,
+                None => {}
+            }
+        }
+
+        // Yeni spektrum geldiyse çiz
+        let spec = {
+            let s = dsp::SPECTRUM.lock().unwrap();
+            (s.seq != last_seq && !s.db.is_empty()).then(|| {
+                last_seq = s.seq;
+                s.db.clone()
+            })
+        };
+        if let Some(db) = spec {
+            let t0 = Instant::now();
+            ui.frame(&mut fb, &db, dial);
+            draw_us += t0.elapsed().as_micros() as u64;
+            frames += 1;
+        }
+
+        if scale_for != Some(dial) {
+            ui.scale(&mut fb, dial);
+            scale_for = Some(dial);
+        }
+
+        if last_hdr.elapsed() >= Duration::from_millis(300) {
+            last_hdr = Instant::now();
+            let s = stats.lock().unwrap().clone();
+            if cat.is_none() {
+                iq_on = false;
+            }
+            let (status, ok) = match (dev, s.running, iq_on) {
+                (None, _, _) if boot.elapsed() > Duration::from_secs(5) => {
+                    ("no QMX - power-cycle it".to_string(), false)
+                }
+                (None, _, _) => ("waiting for QMX".to_string(), false),
+                (Some(_), false, _) => ("no I/Q stream".to_string(), false),
+                (Some(_), true, false) => ("IQ mode OFF".to_string(), false),
+                (Some(_), true, true) => (format!("IQ {:.1}k", s.rate / 1000.0), true),
+            };
+            ui.header(&mut fb, dial, &mode, &status, ok);
+        }
+
+        if perf_t.elapsed() >= Duration::from_secs(10) {
+            if frames > 0 {
+                let (spec_ms, wf_ms, lines) = ui.take_timing();
                 info!(
-                    "CAT: {} {}",
-                    last_cat_reply("FA").unwrap_or_default(),
-                    last_cat_reply("Q9").unwrap_or_default()
+                    "Ekran: {:.1} kare/s, kare ort. {:.1} ms (spektrum {:.1} ms, şelale satırı {:.1} ms)",
+                    frames as f32 / perf_t.elapsed().as_secs_f32(),
+                    draw_us as f32 / frames as f32 / 1000.0,
+                    spec_ms / frames as f32,
+                    wf_ms / lines.max(1) as f32
                 );
             }
+            frames = 0;
+            draw_us = 0;
+            perf_t = Instant::now();
         }
-
-        if last_draw.elapsed() >= Duration::from_millis(500) {
-            last_draw = Instant::now();
-            let s = stats.lock().unwrap().clone();
-            draw_status(&mut fb, dev, &s, cat.as_ref().map(|c| c.iface));
-            // Kart QMX bağlıyken resetlenirse QMX'in USB'si takılı kalıyor;
-            // kablo çıkarmak yetmiyor, QMX'in kapatılıp açılması gerekiyor
-            if dev.is_none() && boot.elapsed() > Duration::from_secs(5) {
-                line(&mut fb, 8, "No QMX? If it is plugged in, power-cycle the QMX.", Rgb565::CSS_ORANGE);
-            } else {
-                line(&mut fb, 8, "", Rgb565::BLACK);
-            }
-        }
-        FreeRtos::delay_ms(20);
+        FreeRtos::delay_ms(5);
     }
 }
 
-fn text(fb: &mut Framebuffer, s: &str, x: i32, y: i32, c: Rgb565) {
-    let _ = Text::new(s, Point::new(x, y), MonoTextStyle::new(&FONT_10X20, c)).draw(fb);
-}
-
-fn line(fb: &mut Framebuffer, row: i32, s: &str, c: Rgb565) {
-    let y = 70 + row * 36;
-    let _ = Rectangle::new(Point::new(0, y - 22), Size::new(W as u32, 32))
-        .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
-        .draw(fb);
-    text(fb, s, 14, y, c);
-}
-
-/// CAT'ten gelen, verilen önekle başlayan son yanıt (ör. "FA" → "FA00014074000;")
-fn last_cat_reply(prefix: &str) -> Option<String> {
+/// CAT'ten gelen, verilen önekle başlayan son yanıtın değeri (ör. "FA" → "00014074000")
+fn cat_value(prefix: &str) -> Option<String> {
     let rx = usb::CAT_RX.lock().unwrap();
     rx.split(';')
         .map(str::trim)
-        .filter(|r| r.starts_with(prefix))
+        .filter(|r| r.starts_with(prefix) && r.len() > prefix.len())
         .last()
-        .map(|r| format!("{r};"))
+        .map(|r| r[prefix.len()..].to_string())
 }
 
-fn draw_status(fb: &mut Framebuffer, dev: Option<(u16, u16)>, s: &IqStats, cat: Option<u8>) {
-    let ok = Rgb565::GREEN;
-    let bad = Rgb565::CSS_ORANGE;
-    match dev {
-        Some((v, p)) => line(fb, 0, &format!("USB device: {v:04X}:{p:04X}"), ok),
-        None => line(fb, 0, "USB device: waiting for QMX...", bad),
-    }
-    if s.format.is_empty() {
-        line(fb, 1, "Audio: -", bad);
-    } else {
-        line(fb, 1, &format!("Audio: {}", s.format), ok);
-    }
-    if s.running {
-        line(fb, 2, &format!("Stream: {:.0} frames/s", s.rate), ok);
-        line(
-            fb,
-            3,
-            &format!("Level: I {:.1} dBFS   Q {:.1} dBFS", s.i_dbfs, s.q_dbfs),
-            Rgb565::WHITE,
-        );
-        let (msg, c) = if s.corr.abs() > 0.95 {
-            ("L = R : plain audio, not I/Q?", bad)
-        } else {
-            ("I and Q differ : looks like I/Q", ok)
-        };
-        line(fb, 4, &format!("Corr {:+.2}  {msg}", s.corr), c);
-    } else {
-        line(fb, 2, "Stream: -", bad);
-        line(fb, 3, "", Rgb565::WHITE);
-        line(fb, 4, "", Rgb565::WHITE);
-    }
-    match (cat, last_cat_reply("FA")) {
-        (Some(i), Some(r)) => line(fb, 5, &format!("CAT (if {i}): {r}"), ok),
-        (Some(i), None) => line(fb, 5, &format!("CAT (if {i}): no reply yet"), bad),
-        _ => line(fb, 5, "CAT: -", bad),
-    }
-    match last_cat_reply("Q9") {
-        Some(r) if r == "Q91;" || r == "Q9 1;" => line(fb, 6, &format!("IQ mode: ON ({r})"), ok),
-        Some(r) => line(fb, 6, &format!("IQ mode: OFF ({r})"), bad),
-        None => line(fb, 6, "IQ mode: unknown", bad),
+fn mode_name(md: &str) -> &'static str {
+    match md.trim() {
+        "1" => "LSB",
+        "2" => "USB",
+        "3" => "CW",
+        "4" => "FM",
+        "5" => "AM",
+        "6" => "DIGI",
+        "7" => "CW-R",
+        "9" => "DIGI-R",
+        _ => "?",
     }
 }
