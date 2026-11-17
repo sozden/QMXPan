@@ -17,7 +17,9 @@ mod gfx;
 mod lcd;
 mod meters;
 mod net;
+mod prop;
 mod settings;
+mod solar;
 mod task;
 mod touch;
 mod ui;
@@ -73,6 +75,7 @@ fn main() -> anyhow::Result<()> {
     // Ayar değişince NVS'ye hemen değil, 2 sn sonra bir kez yazılır
     let mut settings_dirty: Option<Instant> = None;
     dx::start(nvs_part.clone());
+    solar::start();
     net::start(
         p.modem,
         esp_idf_svc::eventloop::EspSystemEventLoop::take()?,
@@ -118,7 +121,10 @@ fn main() -> anyhow::Result<()> {
 
     // METERS sayfası (ilk açılışta hazırlanır) ve gönderim okumaları
     let mut meters: Option<meters::Meters> = None;
+    let mut prop: Option<prop::Prop> = None;
+    // Alt sayfa açık mı (METERS ya da PROPAGATION) ve hangisi
     let mut meters_open = false;
+    let mut sub_tab = meters::Tab::Meters;
     let mut last_meter_poll = Instant::now();
     let mut tx_on = false;
     let mut tx_pwr: Option<f32> = None;
@@ -255,7 +261,7 @@ fn main() -> anyhow::Result<()> {
 
             // METERS açıkken gönderim durumu, güç ve SWR 5 kez/sn sorulur.
             // Yanıtlar okununca tampondan silinir: eski değer yeniden okunmasın.
-            if meters_open && last_meter_poll.elapsed() >= Duration::from_millis(200) {
+            if meters_open && sub_tab == meters::Tab::Meters && last_meter_poll.elapsed() >= Duration::from_millis(200) {
                 last_meter_poll = Instant::now();
                 let _ = c.send("TQ;PC;SW;");
             }
@@ -287,21 +293,42 @@ fn main() -> anyhow::Result<()> {
         }
         ui.set_passband(ui::passband(&mode, fw));
 
+        // Web'den sayfa değiştirme (uzaktan ekran denetimi)
+        let mut close_sub = false;
+        match net::GOTO.swap(0, std::sync::atomic::Ordering::SeqCst) {
+            1 if meters_open => close_sub = true,
+            g @ (2 | 3) => {
+                if !meters_open {
+                    if band_popup || settings_open {
+                        band_popup = false;
+                        settings_open = false;
+                        ui.set_spectrum_hidden(false);
+                    }
+                    meters_open = true;
+                    ui.suspend();
+                }
+                sub_tab = if g == 3 { meters::Tab::Prop } else { meters::Tab::Meters };
+                open_sub(&mut fb, sub_tab, &mut meters, &mut prop);
+            }
+            _ => {}
+        }
+
         // Dokunma: üst şeritte mod düğmeleri ve frekans (band penceresi);
         // spektrum/şelalede sürükleyip bırakınca ayar
         if let Some(t) = tp.as_mut() {
             match t.poll(&mut i2c) {
                 Some(Some((x, y))) if meters_open => {
-                    if !pressed && meters::back_at(x as i32, y as i32) {
-                        info!("METERS kapandı");
-                        meters_open = false;
-                        ui.repaint(&mut fb);
-                        ui.set_panel(&mut fb, panel);
-                        ui.draw_keys(&mut fb, &keys_active(panel, ft8_mode));
-                        scale_for = None;
-                        cw_drawn = None;
-                        ft8_drawn = None;
-                        last_hdr = Instant::now() - Duration::from_secs(1);
+                    let tab = if pressed { None } else { meters::tab_at(x as i32, y as i32) };
+                    match tab {
+                        Some(t @ (meters::Tab::Meters | meters::Tab::Prop)) if t != sub_tab => {
+                            info!("Sayfa: {t:?}");
+                            sub_tab = t;
+                            open_sub(&mut fb, sub_tab, &mut meters, &mut prop);
+                        }
+                        _ => {}
+                    }
+                    if tab == Some(meters::Tab::Back) {
+                        close_sub = true;
                         swallow = true;
                     }
                     pressed = true;
@@ -392,10 +419,10 @@ fn main() -> anyhow::Result<()> {
                                     ui::draw_band_popup(&mut fb, dial.and_then(bands::band_of));
                                 }
                                 ui::Key::Menu => {
-                                    info!("METERS açıldı");
+                                    info!("Alt sayfa açıldı: {sub_tab:?}");
                                     meters_open = true;
                                     ui.suspend();
-                                    meters.get_or_insert_with(meters::Meters::new).enter(&mut fb);
+                                    open_sub(&mut fb, sub_tab, &mut meters, &mut prop);
                                     swallow = true;
                                 }
                                 ui::Key::Display => {
@@ -501,6 +528,19 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        // Alt sayfadan panadapter'a dönüş: ekranı baştan kur
+        if close_sub && meters_open {
+            info!("Alt sayfa kapandı");
+            meters_open = false;
+            ui.repaint(&mut fb);
+            ui.set_panel(&mut fb, panel);
+            ui.draw_keys(&mut fb, &keys_active(panel, ft8_mode));
+            scale_for = None;
+            cw_drawn = None;
+            ft8_drawn = None;
+            last_hdr = Instant::now() - Duration::from_secs(1);
+        }
+
         // Yeni spektrum geldiyse çiz
         let spec = {
             let s = dsp::SPECTRUM.lock().unwrap();
@@ -535,7 +575,12 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        if meters_open {
+        if meters_open && sub_tab == meters::Tab::Prop {
+            if let Some(p) = prop.as_mut() {
+                p.update(&mut fb);
+            }
+        }
+        if meters_open && sub_tab == meters::Tab::Meters {
             if let Some(m) = meters.as_mut() {
                 let s = stats.lock().unwrap().clone();
                 let cal = net::CAL_TENTHS.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
@@ -753,6 +798,19 @@ fn log_peaks(db: &[f32], dial: Option<u64>) {
         })
         .collect();
     info!("Tepeler [ayar {:?}, taban {:.0} dBFS]: {}", dial, median, list.join(", "));
+}
+
+/// Alt sayfayı (ilk açılışta hazırlayıp) ekrana çizer
+fn open_sub(
+    fb: &mut lcd::Framebuffer,
+    tab: meters::Tab,
+    meters: &mut Option<meters::Meters>,
+    prop: &mut Option<prop::Prop>,
+) {
+    match tab {
+        meters::Tab::Prop => prop.get_or_insert_with(prop::Prop::new).enter(fb),
+        _ => meters.get_or_insert_with(meters::Meters::new).enter(fb),
+    }
 }
 
 /// UTC saati "SS:DD:ss"; SNTP saati henüz ayarlamadıysa boş

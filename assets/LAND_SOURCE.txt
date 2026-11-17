@@ -1,0 +1,8 @@
+land_520x260.bin: 520x260 equirectangular land mask (1 bit per pixel, rows of 65 bytes,
+most significant bit on the left).
+
+Made with Natural Earth. Free vector and raster map data @ naturalearthdata.com.
+Source: ne_110m_land.geojson (public domain), from
+https://github.com/nvkelso/natural-earth-vector
+
+Regenerate with: tools\landmask.ps1 -GeoJson ne_110m_land.geojson -W 520 -H 260

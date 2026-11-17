@@ -664,9 +664,40 @@ fn key_x(i: usize) -> i32 {
     8 + (i as i32 * 263) / 2
 }
 
-/// BACK tuşuna dokunuldu mu
-pub fn back_at(x: i32, y: i32) -> bool {
-    y >= KEY_Y - 4 && x >= key_x(5)
+/// Alt sayfaların (METERS, PROPAGATION) tuş çubuğundaki sekmeler
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Tab {
+    Meters,
+    Prop,
+    Back,
+}
+
+/// Dokunulan sekme
+pub fn tab_at(x: i32, y: i32) -> Option<Tab> {
+    if y < KEY_Y - 4 {
+        return None;
+    }
+    let hit = |i: usize| x >= key_x(i) && x < key_x(i) + 125;
+    if hit(0) {
+        Some(Tab::Meters)
+    } else if hit(1) {
+        Some(Tab::Prop)
+    } else if hit(5) {
+        Some(Tab::Back)
+    } else {
+        None
+    }
+}
+
+/// Sekme çubuğu: açık sayfa camgöbeği, diğer sayfa ve BACK koyu
+pub fn draw_tabs(fb: &mut Framebuffer, active: Tab) {
+    crate::gfx::fill(fb, 0, KEY_Y - 4, W as i32, H as i32 - KEY_Y + 4, th::BG);
+    for (i, t, l) in [(0, Tab::Meters, "METERS"), (1, Tab::Prop, "PROPAGATION"), (5, Tab::Back, "BACK")] {
+        let x = key_x(i);
+        let (bg, fg) = if t == active { (th::CY, th::ON_CY) } else { (th::PN2, th::TX) };
+        crate::gfx::rrect(fb, x, KEY_Y, 125, KEY_H, 7, bg);
+        text_c(fb, &F_B14, x + 62, KEY_Y + 20, l, fg);
+    }
 }
 
 pub struct Meters {
@@ -714,13 +745,7 @@ impl Meters {
         let swr = Meter::new(&mut base, 10, 156, 236, 182, &SWR);
         let sm = Meter::new(&mut base, 254, 146, 292, 202, &SMETER);
         let pw = Meter::new(&mut base, 554, 156, 236, 182, &WATTS);
-        // Tuşlar: panadapter tuşları burada kapalı, yalnız BACK
-        for (i, l) in ["BAND", "CW", "FT8", "DISPLAY", "ZOOM", "BACK"].iter().enumerate() {
-            let x = key_x(i);
-            let (bg, fg) = if i == 5 { (th::CY, th::ON_CY) } else { (th::PN, th::LN) };
-            crate::gfx::rrect(&mut base, x, KEY_Y, 125, KEY_H, 7, bg);
-            text_c(&mut base, &F_B14, x + 62, KEY_Y + 20, l, fg);
-        }
+        draw_tabs(&mut base, Tab::Meters);
         log::info!("METERS sayfası hazırlandı: {} ms", t0.elapsed().as_millis());
         Meters {
             base,

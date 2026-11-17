@@ -51,6 +51,8 @@ pub static STATUS: Mutex<Status> = Mutex::new(Status {
 
 /// OTA ilerlemesi: 0 = yok, 1..=100 = yazılıyor, 101 = bitti
 pub static OTA: AtomicU8 = AtomicU8::new(0);
+/// Web'den istenen sayfa: 0 yok, 1 panadapter, 2 METERS, 3 PROPAGATION
+pub static GOTO: AtomicU8 = AtomicU8::new(0);
 /// Ekran başarımı (ana döngü her 10 sn'de yazar; /api/ft8 ile okunur)
 pub static PERF: Mutex<String> = Mutex::new(String::new());
 
@@ -220,11 +222,17 @@ then enter its level:</p><form method=post action=/cal>\
 <input name=port type=number value='{dx_port}' placeholder='Port' required>\
 <input name=call value='{dx_call}' placeholder='Your callsign (sent to the cluster)' required>\
 <button>Save</button></form>\
+<h2>Propagation</h2><p>Solar data (N0NBH): {sol_state}</p>\
+<form method=post action=/qth>\
+<input name=loc value='{qth}' placeholder='Your locator for the map, e.g. KM69 or KM69ab'>\
+<button>Save</button></form>\
 <p>Firmware update: <code>tools\\ota.ps1 -Kart {ip}</code></p></body></html>",
         dx_on = if dx.on { "checked" } else { "" },
         dx_host = html_escape(&dx.host),
         dx_port = dx.port,
         dx_call = html_escape(&dx.call),
+        sol_state = html_escape(&crate::solar::STATE.lock().unwrap()),
+        qth = html_escape(&crate::solar::QTH.lock().unwrap()),
         ver = env!("CARGO_PKG_VERSION"),
         ip = if st.ip.is_empty() { "IP" } else { &st.ip },
         now = now_dbm()
@@ -331,6 +339,31 @@ fn http_server(nvs: std::sync::Arc<Mutex<EspNvs<NvsDefault>>>) -> Result<EspHttp
         })?;
     }
 
+    // Haritadaki konum (Maidenhead), NVS "qth"
+    {
+        let mut b = [0u8; 16];
+        if let Ok(Some(s)) = nvs.lock().unwrap().get_str("qth", &mut b) {
+            *crate::solar::QTH.lock().unwrap() = s.to_string();
+        }
+        let nvs = nvs.clone();
+        server.fn_handler("/qth", Method::Post, move |mut req| -> Result<()> {
+            let body = read_body(&mut req, 256)?;
+            let body = String::from_utf8_lossy(&body);
+            let loc = form_value(&body, "loc").unwrap_or_default().trim().to_string();
+            if !loc.is_empty() && crate::solar::locator(&loc).is_none() {
+                req.into_status_response(400)?.write_all(b"invalid locator (use 4 or 6 characters, e.g. KM69 or KM69ab)\n")?;
+                return Ok(());
+            }
+            nvs.lock().unwrap().set_str("qth", &loc)?;
+            info!("Konum kodu kaydedildi: {loc}");
+            *crate::solar::QTH.lock().unwrap() = loc;
+            req.into_ok_response()?.write_all(
+                format!("{PAGE_HEAD}<p>Saved.</p><p><a href=/>Back</a></p></body></html>").as_bytes(),
+            )?;
+            Ok(())
+        })?;
+    }
+
     let nvs_w = nvs.clone();
     server.fn_handler("/wifi", Method::Post, move |mut req| -> Result<()> {
         let nvs = &nvs_w;
@@ -401,6 +434,20 @@ fn http_server(nvs: std::sync::Arc<Mutex<EspNvs<NvsDefault>>>) -> Result<EspHttp
             ));
         }
         req.into_ok_response()?.write_all(out.as_bytes())?;
+        Ok(())
+    })?;
+
+    // Sayfa değiştirme (uzaktan ekran denetimi için): ?p=pan|meters|prop
+    server.fn_handler("/api/page", Method::Post, |req| -> Result<()> {
+        let uri = req.uri().to_string();
+        let p = match uri.split("p=").nth(1).unwrap_or("") {
+            "pan" => 1,
+            "meters" => 2,
+            "prop" => 3,
+            _ => 0,
+        };
+        GOTO.store(p, Ordering::SeqCst);
+        req.into_ok_response()?.write_all(if p > 0 { b"ok\n" } else { b"use ?p=pan|meters|prop\n" })?;
         Ok(())
     })?;
 

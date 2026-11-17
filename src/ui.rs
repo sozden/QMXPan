@@ -120,7 +120,7 @@ const KEYS: [(Key, &str, bool); 6] = [
     (Key::Ft8, "FT8", true),
     (Key::Display, "DISPLAY", true),
     (Key::Zoom, "ZOOM", true),
-    (Key::Menu, "METERS", true),
+    (Key::Menu, "MENU", true),
 ];
 
 /// Şelalenin altındaki CW metin paneli yüksekliği
