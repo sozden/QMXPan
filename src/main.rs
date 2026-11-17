@@ -80,6 +80,7 @@ fn main() -> anyhow::Result<()> {
     let mut settings_dirty: Option<Instant> = None;
     dx::start(nvs_part.clone());
     solar::start();
+    meters::prebuild();
     net::start(
         p.modem,
         esp_idf_svc::eventloop::EspSystemEventLoop::take()?,
@@ -826,7 +827,7 @@ fn open_sub(
 ) {
     match tab {
         meters::Tab::Prop => prop.get_or_insert_with(prop::Prop::new).enter(fb),
-        _ => meters.get_or_insert_with(meters::Meters::new).enter(fb),
+        _ => meters.get_or_insert_with(meters::take_or_build).enter(fb),
     }
 }
 

@@ -259,6 +259,14 @@ impl Tubes {
         let ghosts = [glyph_segs(8, ox, oy, sx, sy), glyph_segs(0, ox, oy, sx, sy)];
         let (wf, hf) = (w as f32, h as f32);
         let r = wf * 0.42;
+        // Arkadaki sönük katotlar her resimde aynı: uzaklıkları bir kez hesaplanır
+        let ghost_d: Vec<f32> = (0..sh)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+                segs_dist(&ghosts[0], fx, fy).min(segs_dist(&ghosts[1], fx, fy))
+            })
+            .collect();
         let mut spr = Vec::new();
         for d in 0..=10u8 {
             let lit = (d < 10).then(|| glyph_segs(d, ox, oy, sx, sy));
@@ -283,7 +291,7 @@ impl Tubes {
                                 g = mix(g, 0xff8c3c, 0.07);
                             }
                             // arkadaki sönük katotlar
-                            let gd = segs_dist(&ghosts[0], fx, fy).min(segs_dist(&ghosts[1], fx, fy));
+                            let gd = ghost_d[(y * w + x) as usize];
                             g = mix(g, 0xa05a28, 0.18 * (sw / 2.0 + 0.5 - gd).clamp(0.0, 1.0));
                             if let Some(segs) = lit.as_ref() {
                                 let dd = segs_dist(segs, fx, fy);
@@ -698,6 +706,35 @@ pub fn draw_tabs(fb: &mut Framebuffer, active: Tab) {
         crate::gfx::rrect(fb, x, KEY_Y, 125, KEY_H, 7, bg);
         text_c(fb, &F_B14, x + 62, KEY_Y + 20, l, fg);
     }
+}
+
+/// Açılışta arka planda hazırlanan sayfa (ilk MENU dokunuşu beklemesin)
+static PREBUILT: std::sync::Mutex<Option<Meters>> = std::sync::Mutex::new(None);
+
+/// METERS sayfasını düşük öncelikli bir görevde hazırlamaya başlar.
+/// Hazırlık birkaç saniye sürer; ana döngü bu sırada normal çalışır.
+pub fn prebuild() {
+    BUILDING.store(true, std::sync::atomic::Ordering::SeqCst);
+    let r = crate::task::spawn_psram(c"mtr_init", 16 * 1024, 1, esp_idf_svc::hal::cpu::Core::Core0, || {
+        let m = Meters::new();
+        *PREBUILT.lock().unwrap() = Some(m);
+        BUILDING.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
+    if let Err(e) = r {
+        BUILDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        log::warn!("METERS ön hazırlığı başlatılamadı: {e}");
+    }
+}
+
+static BUILDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Hazır sayfayı verir. Ön hazırlık sürüyorsa onun bitmesini bekler (iki kez
+/// hazırlanmasın); hiç başlamadıysa burada hazırlar.
+pub fn take_or_build() -> Meters {
+    while BUILDING.load(std::sync::atomic::Ordering::SeqCst) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    PREBUILT.lock().unwrap().take().unwrap_or_else(Meters::new)
 }
 
 pub struct Meters {
