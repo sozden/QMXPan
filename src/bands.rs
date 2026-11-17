@@ -75,6 +75,22 @@ impl Memory {
             .unwrap_or(b.default)
     }
 
+    /// QMX'in geçmeyi reddettiği bantlar (bit i = BANDS[i]); kart bunu kendisi öğrenir
+    pub fn missing(&self) -> u16 {
+        self.nvs
+            .as_ref()
+            .and_then(|n| n.get_u16("nobands").ok().flatten())
+            .unwrap_or(0)
+    }
+
+    pub fn set_missing(&self, mask: u16) {
+        if let Some(n) = self.nvs.as_ref() {
+            if let Err(e) = n.set_u16("nobands", mask) {
+                warn!("Bant listesi kaydedilemedi: {e}");
+            }
+        }
+    }
+
     pub fn set(&self, i: usize, f: u64) {
         if let Some(n) = self.nvs.as_ref() {
             if let Err(e) = n.set_u32(&Self::key(i), f as u32) {

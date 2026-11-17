@@ -1235,7 +1235,8 @@ fn band_button_rect(i: usize) -> (i32, i32) {
     (BP_X + 14 + col * (BB_W + BB_GAP), BP_Y + 52 + row * (BB_H + BB_GAP))
 }
 
-pub fn draw_band_popup(fb: &mut Framebuffer, current: Option<usize>) {
+/// `missing`: QMX'in geçmediği bantlar (bit i); soluk gösterilir ama basılabilir
+pub fn draw_band_popup(fb: &mut Framebuffer, current: Option<usize>, missing: u16) {
     gfx::fill(fb, 0, SPEC_Y as i32, W as i32, (WF_Y + WF_H - SPEC_Y) as i32, th::BG);
     rrect(fb, BP_X - 1, BP_Y - 1, BP_W + 2, BP_H + 2, 11, th::CY);
     rrect(fb, BP_X, BP_Y, BP_W, BP_H, 10, th::PN);
@@ -1244,9 +1245,17 @@ pub fn draw_band_popup(fb: &mut Framebuffer, current: Option<usize>) {
     for (i, b) in crate::bands::BANDS.iter().enumerate() {
         let (x, y) = band_button_rect(i);
         let sel = current == Some(i);
-        rrect(fb, x, y, BB_W, BB_H, 8, if sel { th::AM } else { th::PN2 });
-        text_c(fb, &F_B30, x + BB_W / 2, y + 36, b.name, if sel { th::ON_AM } else { th::TX });
-        text_c(fb, &F_R11, x + BB_W / 2, y + 54, "m", if sel { th::ON_AM } else { th::MU });
+        let gone = missing & (1 << i) != 0 && !sel;
+        let (bg, fg, sub) = if sel {
+            (th::AM, th::ON_AM, th::ON_AM)
+        } else if gone {
+            (th::PN, th::LN, th::LN)
+        } else {
+            (th::PN2, th::TX, th::MU)
+        };
+        rrect(fb, x, y, BB_W, BB_H, 8, bg);
+        text_c(fb, &F_B30, x + BB_W / 2, y + 36, b.name, fg);
+        text_c(fb, &F_R11, x + BB_W / 2, y + 54, if gone { "not on QMX" } else { "m" }, sub);
     }
     let (x, y) = band_button_rect(SET_BUTTON);
     rrect(fb, x, y, BB_W, BB_H, 8, th::PN2);

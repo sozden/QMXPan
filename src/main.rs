@@ -98,6 +98,10 @@ fn main() -> anyhow::Result<()> {
     let mut cat: Option<Cat> = None;
     let mut audio_ifaces: Vec<u8> = Vec::new();
     let mut cat_retry: Option<Instant> = None;
+    // Bant isteği: QMX gerçekten o banda geçti mi (bazı QMX'lerde bazı bantlar yok)
+    let mut band_check: Option<(usize, Instant)> = None;
+    // Üst şeritte birkaç saniye gösterilen uyarı
+    let mut notice: Option<(String, Instant)> = None;
     let mut last_kick = Instant::now();
     let mut kicks = 0u32;
 
@@ -255,7 +259,16 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             if Instant::now() >= hold_dial_until {
-                if let Some(f) = cat_value("FA").and_then(|v| v.parse::<u64>().ok()) {
+                // FA yanıtı 11 hanedir; tampon kırpılınca yarım kalan "FA0" gibi
+                // parçalar 0 Hz okunuyordu
+                if let Some(f) = cat_value("FA")
+                    .filter(|v| v.len() == 11)
+                    .and_then(|v| v.parse::<u64>().ok())
+                {
+                    // Tanı: QMX'in bildirdiği frekans büyük ölçüde değiştiyse kayda yaz
+                    if dial.is_some_and(|d| d.abs_diff(f) > 100_000) {
+                        info!("QMX frekansı (CAT FA): {} → {}", ui::fmt_freq(dial.unwrap()), ui::fmt_freq(f));
+                    }
                     dial = Some(f);
                 }
             }
@@ -390,6 +403,7 @@ fn main() -> anyhow::Result<()> {
                                     let _ = c.send(&format!("FA{f:011};"));
                                     dial = Some(f);
                                     hold_dial_until = Instant::now() + Duration::from_millis(900);
+                                    band_check = Some((i, Instant::now()));
                                     // Eski bandın şelalesi yeni frekanslarla karışmasın
                                     ui.clear_waterfall(&mut fb);
                                 }
@@ -429,7 +443,7 @@ fn main() -> anyhow::Result<()> {
                             match k {
                                 ui::Key::Band if dial.is_some() => {
                                     band_popup = true;
-                                    ui::draw_band_popup(&mut fb, dial.and_then(bands::band_of));
+                                    ui::draw_band_popup(&mut fb, dial.and_then(bands::band_of), band_mem.missing());
                                 }
                                 ui::Key::Menu => {
                                     info!("Alt sayfa açıldı: {sub_tab:?}");
@@ -507,7 +521,7 @@ fn main() -> anyhow::Result<()> {
                             last_hdr = Instant::now() - Duration::from_secs(1);
                         } else if ui::freq_area_at(x as i32, y as i32) && dial.is_some() {
                             band_popup = true;
-                            ui::draw_band_popup(&mut fb, dial.and_then(bands::band_of));
+                            ui::draw_band_popup(&mut fb, dial.and_then(bands::band_of), band_mem.missing());
                         }
                     }
                     pressed = true;
@@ -537,6 +551,28 @@ fn main() -> anyhow::Result<()> {
                     ui.set_cursor(None);
                 }
                 None => {}
+            }
+        }
+
+        // Seçilen banda 1,5 sn içinde geçilmediyse QMX o bandı desteklemiyor:
+        // işaretle (band penceresinde soluk) ve üst şeritte uyar
+        if let Some((i, t)) = band_check {
+            // QMX bağlantısı koptuysa karar verilmez (yanlışlıkla "yok" işaretlenmesin)
+            if cat.is_none() || dial.is_none() {
+                band_check = None;
+            } else if t.elapsed() >= Duration::from_millis(1500) {
+                band_check = None;
+                let mask = band_mem.missing();
+                let now_in = dial.and_then(bands::band_of) == Some(i);
+                let new = if now_in { mask & !(1 << i) } else { mask | (1 << i) };
+                if !now_in {
+                    warn!("QMX {} m bandına geçmedi", bands::BANDS[i].name);
+                    notice = Some((format!("QMX: {} m not available", bands::BANDS[i].name), Instant::now()));
+                    last_hdr = Instant::now() - Duration::from_secs(1);
+                }
+                if new != mask {
+                    band_mem.set_missing(new);
+                }
             }
         }
 
@@ -641,7 +677,8 @@ fn main() -> anyhow::Result<()> {
                 m.update(&mut fb, &data);
             }
         }
-        if !settings_open && !meters_open && scale_for != Some(dial) {
+        // Band penceresi açıkken ölçek çizilmez (pencerenin alt sırasının üstüne biniyordu)
+        if !settings_open && !meters_open && !band_popup && scale_for != Some(dial) {
             ui.scale(&mut fb, dial);
             scale_for = Some(dial);
         }
@@ -725,8 +762,13 @@ fn main() -> anyhow::Result<()> {
                 (Some(_), true, true) => (format!("IQ {:.1} kHz", s.rate / 1000.0), true),
             };
             let ota = net::OTA.load(std::sync::atomic::Ordering::Relaxed);
+            if notice.as_ref().is_some_and(|(_, t)| t.elapsed() >= Duration::from_secs(5)) {
+                notice = None;
+            }
             let (status, ok) = if (1..=101).contains(&ota) {
                 (format!("OTA {}%", ota.min(100)), true)
+            } else if let Some((n, _)) = notice.as_ref() {
+                (n.clone(), false)
             } else {
                 (status, ok)
             };
