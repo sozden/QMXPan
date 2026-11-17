@@ -46,7 +46,7 @@ fn set_state(s: &str) {
 }
 
 pub fn start() {
-    let r = crate::task::spawn(c"solar", 12 * 1024, 2, esp_idf_svc::hal::cpu::Core::Core0, || loop {
+    let r = crate::task::spawn_psram(c"solar", 12 * 1024, 2, esp_idf_svc::hal::cpu::Core::Core0, || loop {
         if crate::net::STATUS.lock().unwrap().mode != crate::net::Mode::Station {
             set_state("waiting for WiFi");
             std::thread::sleep(Duration::from_secs(5));

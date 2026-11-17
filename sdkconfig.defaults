@@ -44,3 +44,6 @@ CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=8192
 # HTTPS (güneş verisi): TLS tamponları PSRAM'de, tam kök sertifika paketi
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+# Ağ görevlerinin (solar, dx) yığınları PSRAM'de olabilsin; iç RAM I/Q'ya kalsın
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y

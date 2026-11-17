@@ -89,7 +89,7 @@ pub fn save_cfg(nvs: &EspNvs<NvsDefault>, c: &Cfg) -> anyhow::Result<()> {
 }
 
 pub fn start(part: EspDefaultNvsPartition) {
-    let r = crate::task::spawn(c"dx", 8 * 1024, 3, esp_idf_svc::hal::cpu::Core::Core0, move || {
+    let r = crate::task::spawn_psram(c"dx", 8 * 1024, 3, esp_idf_svc::hal::cpu::Core::Core0, move || {
         let nvs = match EspNvs::new(part, "qmxpan", true) {
             Ok(n) => n,
             Err(e) => {

@@ -86,6 +86,16 @@ pub fn power_down_port() {
     }
 }
 
+/// Portu kapatıp yeniden açar. Başarısız bir tanıma denemesinden sonra port
+/// yeni bağlantıları görmeyebiliyor; aygıt yokken bu onu toparlar.
+pub fn kick_port() {
+    unsafe {
+        x::usb_host_lib_set_root_port_power(false);
+        esp_idf_svc::hal::delay::FreeRtos::delay_ms(150);
+        x::usb_host_lib_set_root_port_power(true);
+    }
+}
+
 // ------------------------------------------------------------ geri çağrılar
 
 unsafe extern "C" fn new_dev_cb(dev: x::usb_device_handle_t) {

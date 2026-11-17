@@ -55,6 +55,10 @@ fn main() -> anyhow::Result<()> {
     let mut exp = board::Expander::init(&mut i2c)?;
     board::reset_touch(&mut i2c, &mut exp, p.pins.gpio4.into())?;
     let mut tp = touch::Gt911::probe(&mut i2c);
+    // OTA geri dönüşünü iptal et: ekran başlamadan ÖNCE yapılmalı. İşaretleme
+    // flash'ı belleğe eşlerken önbelleği bir an dondurur; ekran çalışıyorsa
+    // RGB kesmesi PSRAM'deki görüntüyü okumaya çalışıp kartı çökertiyor.
+    net::mark_valid();
     let mut fb = lcd::init()?;
     let mut ui = ui::Ui::new(&mut fb);
 
@@ -81,7 +85,6 @@ fn main() -> anyhow::Result<()> {
         esp_idf_svc::eventloop::EspSystemEventLoop::take()?,
         nvs_part,
     );
-    let mut marked_valid = false;
     let mut band_popup = false;
     // S-metre (dBFS, geçiş bandındaki en güçlü bin; hızlı yükselir, yavaş düşer)
     let mut smeter: Option<f32> = None;
@@ -94,6 +97,8 @@ fn main() -> anyhow::Result<()> {
     let mut cat: Option<Cat> = None;
     let mut audio_ifaces: Vec<u8> = Vec::new();
     let mut cat_retry: Option<Instant> = None;
+    let mut last_kick = Instant::now();
+    let mut kicks = 0u32;
 
     let mut dial: Option<u64> = None;
     let mut mode = String::new();
@@ -155,11 +160,6 @@ fn main() -> anyhow::Result<()> {
             FreeRtos::delay_ms(700);
             unsafe { esp_idf_svc::sys::esp_restart() };
         }
-        // 15 sn sorunsuz çalıştıysa bu yazılımı kalıcı yap (OTA geri dönüşünü iptal et)
-        if !marked_valid && boot.elapsed() >= Duration::from_secs(15) {
-            net::mark_valid();
-            marked_valid = true;
-        }
 
         while let Ok(ev) = events.try_recv() {
             match ev {
@@ -172,7 +172,7 @@ fn main() -> anyhow::Result<()> {
                     audio_ifaces.push(iface);
                     match IqStream::open(addr, iface, stats.clone()) {
                         Ok(s) => iq = Some(s),
-                        Err(e) => warn!("I/Q akışı açılamadı: {e}"),
+                        Err(e) => warn!("I/Q akışı açılamadı: {e} (boş iç RAM {} B)", free_internal()),
                     }
                 }
                 Ev::UacGone(h) => {
@@ -193,6 +193,17 @@ fn main() -> anyhow::Result<()> {
                     usb::CAT_RX.lock().unwrap().clear();
                 }
             }
+        }
+
+        // QMX yokken USB portu 6 sn'de bir kapatılıp açılır: başarısız bir tanıma
+        // denemesinden sonra port, QMX kapatılıp açılsa bile yeni bağlantıyı görmüyor
+        if dev.is_none() && boot.elapsed() >= Duration::from_secs(8) && last_kick.elapsed() >= Duration::from_secs(6) {
+            last_kick = Instant::now();
+            kicks += 1;
+            if kicks % 10 == 1 {
+                info!("QMX yok: USB portu yeniden açılıyor ({kicks}. kez)");
+            }
+            usb::kick_port();
         }
 
         // CAT portunu bul ve I/Q modunu aç
@@ -729,12 +740,13 @@ fn main() -> anyhow::Result<()> {
             if frames > 0 {
                 let (spec_ms, wf_ms, lines) = ui.take_timing();
                 let line = format!(
-                    "{:.1} fps, frame {:.1} ms (spectrum {:.1}, wf line {:.1}), max loop gap {} ms",
+                    "{:.1} fps, frame {:.1} ms (spectrum {:.1}, wf line {:.1}), max loop gap {} ms, internal RAM free {} B",
                     frames as f32 / perf_t.elapsed().as_secs_f32(),
                     draw_us as f32 / frames as f32 / 1000.0,
                     spec_ms / frames as f32,
                     wf_ms / lines.max(1) as f32,
-                    max_gap_ms
+                    max_gap_ms,
+                    free_internal()
                 );
                 info!("Ekran: {line}");
                 *net::PERF.lock().unwrap() = line;
@@ -798,6 +810,11 @@ fn log_peaks(db: &[f32], dial: Option<u64>) {
         })
         .collect();
     info!("Tepeler [ayar {:?}, taban {:.0} dBFS]: {}", dial, median, list.join(", "));
+}
+
+/// Boş iç RAM (bayt): görev yığınları ve USB/WiFi buradan alır
+fn free_internal() -> usize {
+    unsafe { esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_INTERNAL) }
 }
 
 /// Alt sayfayı (ilk açılışta hazırlayıp) ekrana çizer

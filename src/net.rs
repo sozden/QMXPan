@@ -166,11 +166,53 @@ fn run(modem: Modem<'static>, sysloop: EspSystemEventLoop, part: EspDefaultNvsPa
         None
     };
 
-    // Bağlantıyı izle, koparsa yeniden bağlan
+    // Kart prizden besleniyor: WiFi güç tasarrufu kapalı (tasarruf modunda
+    // bağlantı açık görünüp trafiğin durduğu görüldü)
+    if connected {
+        unsafe {
+            esp_idf_svc::sys::esp_wifi_set_ps(esp_idf_svc::sys::wifi_ps_type_t_WIFI_PS_NONE);
+        }
+    }
+
+    // Bağlantıyı izle, koparsa yeniden bağlan. Bağlı görünse de dakikada bir
+    // ağ geçidine ping atılır; 3 kez üst üste yanıt yoksa yeniden bağlanılır.
+    let mut tick = 0u32;
+    let mut ping_fail = 0u32;
     loop {
         std::thread::sleep(Duration::from_secs(5));
-        if STATUS.lock().unwrap().mode != Mode::Station {
+        // Kurulum ağındayken izlenecek bir şey yok; "Connecting" durumunda
+        // kalındıysa (önceki deneme başarısız) yeniden denenir
+        if !matches!(STATUS.lock().unwrap().mode, Mode::Station | Mode::Connecting) {
             continue;
+        }
+        tick += 1;
+        if tick % 12 == 0 && wifi.is_connected().unwrap_or(false) {
+            let ok = wifi
+                .wifi()
+                .sta_netif()
+                .get_ip_info()
+                .ok()
+                .and_then(|i| {
+                    esp_idf_svc::ping::EspPing::default()
+                        .ping(
+                            i.subnet.gateway,
+                            &esp_idf_svc::ping::Configuration { count: 3, ..Default::default() },
+                        )
+                        .ok()
+                })
+                .is_some_and(|s| s.received > 0);
+            if ok {
+                ping_fail = 0;
+            } else {
+                ping_fail += 1;
+                warn!("Ağ geçidi yanıt vermiyor ({ping_fail}/3)");
+                if ping_fail >= 3 {
+                    ping_fail = 0;
+                    warn!("WiFi trafiği durmuş: bağlantı kesilip yeniden kuruluyor");
+                    let _ = wifi.disconnect();
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
         }
         if !wifi.is_connected().unwrap_or(false) {
             warn!("WiFi koptu, yeniden bağlanılıyor");
