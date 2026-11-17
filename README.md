@@ -43,7 +43,7 @@ Lite does not start any WiFi at all. That leaves more memory free and gives a si
 
 ### Easiest: from the browser
 
-1. Open the **[QMXPan installer page](https://OWNER.github.io/QMXPan/)** in Chrome or Edge on a computer.
+1. Open the **[QMXPan installer page](https://sozden.github.io/QMXPan/)** in Chrome or Edge on a computer.
 2. Connect the board's **UART** USB port to the computer.
 3. Click **Install Full** or **Install Lite**, choose the serial port, and confirm.
 
@@ -53,7 +53,7 @@ callsign and settings are kept.
 ### By hand
 
 Download `qmxpan-full-<version>.bin` or `qmxpan-lite-<version>.bin` from the
-[Releases](https://github.com/OWNER/QMXPan/releases) page and write it at address `0x0`:
+[Releases](https://github.com/sozden/QMXPan/releases) page and write it at address `0x0`:
 
 ```bash
 espflash write-bin 0x0 qmxpan-full-0.14.0.bin

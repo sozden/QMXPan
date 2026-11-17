@@ -43,7 +43,7 @@ Lite hiç WiFi başlatmaz. Bu sayede daha çok bellek boş kalır ve açılış 
 
 ### En kolayı: tarayıcıdan
 
-1. Bilgisayarda Chrome ya da Edge ile **[QMXPan yükleme sayfasını](https://OWNER.github.io/QMXPan/)** açın.
+1. Bilgisayarda Chrome ya da Edge ile **[QMXPan yükleme sayfasını](https://sozden.github.io/QMXPan/)** açın.
 2. Kartın **UART** USB portunu bilgisayara bağlayın.
 3. **Install Full** ya da **Install Lite** düğmesine basın, seri portu seçip onaylayın.
 
@@ -52,7 +52,7 @@ WiFi, çağrı işareti ve ayarlar korunur.
 
 ### Elle
 
-[Releases](https://github.com/OWNER/QMXPan/releases) sayfasından `qmxpan-full-<sürüm>.bin`
+[Releases](https://github.com/sozden/QMXPan/releases) sayfasından `qmxpan-full-<sürüm>.bin`
 ya da `qmxpan-lite-<sürüm>.bin` dosyasını indirip `0x0` adresine yazın:
 
 ```bash
