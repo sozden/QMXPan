@@ -141,4 +141,4 @@ QMX ve QMX+ QRP Labs ürünleridir. QMXPan bağımsız bir projedir ve QRP Labs 
 
 ## Lisans
 
-LICENSE_TBD
+MIT, bkz. [LICENSE](LICENSE). Pakette gelen ft8_lib (`components/ft8_lib`) kendi MIT lisansını korur.

@@ -3,6 +3,7 @@ name = "qmxpan"
 version = "0.14.0"
 authors = ["Şadan Özden"]
 edition = "2021"
+license = "MIT"
 resolver = "2"
 rust-version = "1.77"
 description = "QMX/QMX+ için ESP32-S3 (Waveshare 4.3\") panadapter"

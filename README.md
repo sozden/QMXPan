@@ -148,4 +148,4 @@ affiliated with QRP Labs.
 
 ## License
 
-LICENSE_TBD
+MIT, see [LICENSE](LICENSE). The bundled ft8_lib (`components/ft8_lib`) keeps its own MIT license.
