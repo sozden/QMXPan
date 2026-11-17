@@ -61,6 +61,9 @@ pub struct View {
     pub zoom: u32,
     /// Ayar frekansının LO'ya göre konumu (Hz): 12000, CW'de 12000 + CW offset
     pub if_hz: i64,
+    /// Büyütmede ekran ortasının ayar frekansına uzaklığı (Hz). FT8/FT4 açıkken
+    /// +1500: ayarın 0..3 kHz üstündeki dijital bant ortaya gelir. ×1'de etkisiz.
+    pub ofs: i64,
 }
 
 // Not: hesaplar tam sayıyla (Hz/piksel = 60/zoom). f64 kullanan sürüm Xtensa
@@ -78,7 +81,7 @@ impl View {
         if self.zoom == 1 {
             (W as i64 / 2 + self.if_hz / 60) as i32
         } else {
-            W as i32 / 2
+            (W as i64 / 2 - self.hz_to_px(self.ofs)) as i32
         }
     }
     /// LO sızıntısının bastırıldığı "veri yok" bölgesi (±700 Hz ≈ ±12 piksel)
@@ -90,8 +93,12 @@ impl View {
         if self.zoom == 1 {
             dial as i64 - self.if_hz
         } else {
-            dial as i64
+            dial as i64 + self.ofs
         }
+    }
+    /// Büyütmede seyrelticinin 0 Hz'e indireceği frekans (LO'ya göre)
+    pub fn zoom_center(&self) -> i64 {
+        self.if_hz + self.ofs
     }
     pub fn x_to_freq(&self, x: i32, dial: u64) -> u64 {
         (self.center(dial) + self.px_to_hz(x as i64 - W as i64 / 2)).max(0) as u64
@@ -336,7 +343,7 @@ impl Ui {
             set: Settings::default(),
             spectrum_hidden: false,
             wf_dial: None,
-            view: View { zoom: 1, if_hz: LO_OFFSET },
+            view: View { zoom: 1, if_hz: LO_OFFSET, ofs: 0 },
             labels: Vec::new(),
             label_hits: Vec::new(),
             ft8_key: "FT8",
@@ -720,7 +727,7 @@ impl Ui {
         if zoom == self.view.zoom {
             return;
         }
-        self.set_view(fb, View { zoom, if_hz: self.view.if_hz });
+        self.set_view(fb, View { zoom, ..self.view });
     }
 
     /// Ayar frekansının LO'ya göre konumunu değiştirir (CW'ye geçince / CW offset).
@@ -728,7 +735,15 @@ impl Ui {
         if if_hz == self.view.if_hz {
             return;
         }
-        self.set_view(fb, View { zoom: self.view.zoom, if_hz });
+        self.set_view(fb, View { if_hz, ..self.view });
+    }
+
+    /// Büyütmede ekran ortasının ayar frekansına uzaklığı (FT8/FT4 için +1500 Hz)
+    pub fn set_ofs(&mut self, fb: &mut Framebuffer, ofs: i64) {
+        if ofs == self.view.ofs {
+            return;
+        }
+        self.set_view(fb, View { ofs, ..self.view });
     }
 
     fn set_view(&mut self, fb: &mut Framebuffer, v: View) {
@@ -988,11 +1003,14 @@ impl Ui {
         if let Some(d) = dial {
             let s = fmt_freq(d);
             let w = gfx::text_w(&F_B12, &s) + 14;
+            // Ayar çizgisi kenara yakınsa (FT8 görünümünde sol kenarda) etiket
+            // ekranın içinde kalsın
+            let x0 = (dx - w / 2).clamp(2, W as i32 - w - 2);
             // Etiket önce spektrum zemin rengine boyanır ki yuvarlak köşelerin
             // yumuşatması siyaha (saydam) değil zemine karışsın
-            gfx::fill(o, dx - w / 2, 3, w, 15, th::SPEC_BG);
-            rrect(o, dx - w / 2, 3, w, 15, 7, th::AM);
-            text_c(o, &F_B12, dx, 15, &s, th::ON_AM);
+            gfx::fill(o, x0, 3, w, 15, th::SPEC_BG);
+            rrect(o, x0, 3, w, 15, 7, th::AM);
+            text_c(o, &F_B12, x0 + w / 2, 15, &s, th::ON_AM);
         }
     }
 
@@ -1142,19 +1160,19 @@ impl Ui {
     fn waterfall_line(&mut self, fb: &mut Framebuffer, col: &[f32], dial: Option<u64>) {
         // Frekans değiştiyse eski satırları yatayda kaydır ki sinyaller hizalı kalsın
         // Kayma tam piksel kadar yapılır; artan Hz'ler sonraki kaymaya kalır.
-        // wf_dial, kesirli Hz/piksel (×8'de 7.5) için Hz × 2 birimindedir.
+        // wf_dial, kesirli Hz/piksel (×8'de 7.5, ×16'da 3.75) için Hz × 4 birimindedir.
         let z = self.view.zoom as i64;
         match (dial, self.wf_dial) {
-            (Some(d), Some(old2)) => {
-                let d2 = d as i64 * 2;
-                // piksel = Δ(Hz) · zoom / 60 = Δ(Hz×2) · zoom / 120
-                let shift = (old2 - d2) * z / 120;
+            (Some(d), Some(old4)) => {
+                let d4 = d as i64 * 4;
+                // piksel = Δ(Hz) · zoom / 60 = Δ(Hz×4) · zoom / 240
+                let shift = (old4 - d4) * z / 240;
                 if shift != 0 {
                     shift_rows(fb, shift, self.wf_h);
-                    self.wf_dial = Some(old2 - shift * 120 / z);
+                    self.wf_dial = Some(old4 - shift * 240 / z);
                 }
             }
-            (Some(d), None) => self.wf_dial = Some(d as i64 * 2),
+            (Some(d), None) => self.wf_dial = Some(d as i64 * 4),
             (None, _) => {}
         }
         let start = WF_Y * W;

@@ -307,6 +307,7 @@ fn main() -> anyhow::Result<()> {
 
         // Web'den sayfa değiştirme (uzaktan ekran denetimi)
         let mut close_sub = false;
+        let mut want_zoom: Option<u32> = None;
         match net::GOTO.swap(0, std::sync::atomic::Ordering::SeqCst) {
             1 if meters_open => close_sub = true,
             g @ (2 | 3) => {
@@ -443,20 +444,15 @@ fn main() -> anyhow::Result<()> {
                                     ui::draw_settings(&mut fb, &ui.settings());
                                 }
                                 ui::Key::Zoom => {
-                                    // ×1 → ×2 → ×4 → ×8 → ×1
+                                    // ×1 → ×2 → ×4 → ×8 → ×16 → ×1
                                     let z = match ui.view().zoom {
                                         1 => 2,
                                         2 => 4,
                                         4 => 8,
+                                        8 => 16,
                                         _ => 1,
                                     };
-                                    info!("Büyütme x{z}");
-                                    dsp::ZOOM.store(z, std::sync::atomic::Ordering::Relaxed);
-                                    ui.set_zoom(&mut fb, z);
-                                    scale_for = None;
-                                    ui.draw_keys(&mut fb, &keys_active(panel, ft8_mode));
-                                    cw_drawn = None;
-                                    ft8_drawn = None;
+                                    want_zoom = Some(z);
                                 }
                                 ui::Key::Cw | ui::Key::Ft8 => {
                                     // CW ve FT8 aynı anda açık olmaz. FT8 tuşu üç durum
@@ -470,6 +466,10 @@ fn main() -> anyhow::Result<()> {
                                             _ => (ui::Panel::None, 0),
                                         },
                                     };
+                                    // FT8 şelalesine geçerken ×16: ayarın 0..3 kHz üstü tüm ekranı kaplar
+                                    if nf == 2 && ui.view().zoom != 16 {
+                                        want_zoom = Some(16);
+                                    }
                                     panel = np;
                                     ft8_mode = nf;
                                     cw::ON.store(panel == ui::Panel::Cw, std::sync::atomic::Ordering::Relaxed);
@@ -538,6 +538,34 @@ fn main() -> anyhow::Result<()> {
                 }
                 None => {}
             }
+        }
+
+        // Büyütme değişimi (ZOOM tuşu ya da FT8 şelalesine geçiş)
+        if let Some(z) = want_zoom.take() {
+            info!("Büyütme x{z}");
+            dsp::ZOOM.store(z, std::sync::atomic::Ordering::Relaxed);
+            ui.set_zoom(&mut fb, z);
+            scale_for = None;
+            ui.draw_keys(&mut fb, &keys_active(panel, ft8_mode));
+            cw_drawn = None;
+            ft8_drawn = None;
+        }
+        // FT8 açıkken büyütülmüş görünümün ortası ayar + 1500 Hz (USB tarafı;
+        // LSB'de −1500): dijital bant ekranın ortasına gelir
+        let ofs: i64 = if ft8_mode == 0 {
+            0
+        } else {
+            match mode.as_str() {
+                "USB" | "DIGI" => 1500,
+                "LSB" | "DIGI-R" => -1500,
+                _ => 0,
+            }
+        };
+        if ofs != ui.view().ofs && !meters_open {
+            info!("Görünüm kayması {ofs:+} Hz");
+            dsp::ZOOM_OFS.store(ofs as i32, std::sync::atomic::Ordering::Relaxed);
+            ui.set_ofs(&mut fb, ofs);
+            scale_for = None;
         }
 
         // Alt sayfadan panadapter'a dönüş: ekranı baştan kur

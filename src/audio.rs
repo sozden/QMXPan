@@ -56,7 +56,12 @@ pub struct Decim {
 
 impl Decim {
     pub fn new(center: f32, decim: usize) -> Self {
-        let ntaps = if decim >= 4 { 128 } else { 96 };
+        // Dar bantta (×16) geçiş bölgesi de daralmalı: daha uzun süzgeç
+        let ntaps = match decim {
+            16.. => 256,
+            4.. => 128,
+            _ => 96,
+        };
         // Kesim, çıkış Nyquist'inin %90'ı: ekran kenarlarına kadar düz kalsın
         let fc = 0.45 / decim as f32;
         Self {

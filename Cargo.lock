@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "qmxpan"
-version = "0.12.4"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "embedded-graphics",

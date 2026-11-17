@@ -334,6 +334,7 @@ fn reader(h: usize, ch: usize, sub: usize, stop: Arc<AtomicBool>, stats: Arc<Mut
     let mut if_hz = if_of();
     // Büyütme: ayar frekansı (LO + IF) 0 Hz'e indirilip seyreltilir
     let mut zoom = 1u32;
+    let mut ofs = 0i32;
     let mut zdec: Option<crate::audio::Decim> = None;
     // CW: ayar frekansındaki sinyal → 700 Hz ton, 6 kHz (±900 Hz pencere)
     let mk_cw = |f: u32| crate::audio::Demod::new(f as f32, 900.0, 8, 700.0, 100.0);
@@ -350,14 +351,16 @@ fn reader(h: usize, ch: usize, sub: usize, stop: Arc<AtomicBool>, stats: Arc<Mut
         let ft8_on = crate::ft8::ON.load(Ordering::Relaxed);
         let want = crate::dsp::ZOOM.load(Ordering::Relaxed);
         let want_if = if_of();
-        if want != zoom || want_if != if_hz {
+        let want_ofs = crate::dsp::ZOOM_OFS.load(Ordering::Relaxed);
+        if want != zoom || want_if != if_hz || want_ofs != ofs {
             zoom = want;
+            ofs = want_ofs;
             if want_if != if_hz {
                 if_hz = want_if;
                 cw_demod = mk_cw(if_hz);
                 ft8_demod = mk_ft8(if_hz);
             }
-            let center = if_hz as f32;
+            let center = (if_hz as i32 + ofs) as f32;
             zdec = (zoom > 1).then(|| crate::audio::Decim::new(center, zoom as usize));
             an.set_zoom(zoom, if zoom > 1 { center } else { 0.0 });
         }
