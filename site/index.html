@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>QMXPan Installer</title>
+<!-- ESP Web Tools (Apache-2.0, ESPHome): Web Serial ile ESP32'ye yükleme -->
+<script type="module" src="https://unpkg.com/esp-web-tools@10.0.1/dist/web/install-button.js?module"></script>
+<style>
+  :root { --bg:#0d1117; --pn:#161b22; --tx:#e6edf3; --mu:#8b949e; --cy:#39c5cf; --am:#f0b429; }
+  body { margin:0; background:var(--bg); color:var(--tx); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { margin:0 0 4px; font-size:28px; }
+  .sub { color:var(--mu); margin:0 0 24px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; }
+  .card { background:var(--pn); border:1px solid #30363d; border-radius:12px; padding:18px; }
+  .card h2 { margin:0 0 6px; font-size:20px; color:var(--cy); }
+  .card ul { padding-left:18px; margin:8px 0 16px; color:var(--mu); }
+  esp-web-install-button button[slot=activate] {
+    background:var(--cy); color:#002; border:0; border-radius:8px; padding:10px 18px;
+    font-size:16px; font-weight:600; cursor:pointer; }
+  .note { margin-top:24px; background:var(--pn); border-left:4px solid var(--am); padding:12px 16px; border-radius:6px; }
+  code { color:var(--cy); }
+  a { color:var(--cy); }
+</style>
+</head>
+<body>
+<main>
+  <h1>QMXPan</h1>
+  <p class="sub">Panadapter for the QRP Labs QMX / QMX+ on the Waveshare ESP32-S3-Touch-LCD-4.3</p>
+
+  <div class="cards">
+    <div class="card">
+      <h2>Full</h2>
+      <p>For stations with WiFi.</p>
+      <ul>
+        <li>Spectrum, waterfall, CW and FT8 decoders, meters</li>
+        <li>Internet clock, DX cluster spots, propagation page</li>
+        <li>Web settings and firmware updates over WiFi</li>
+      </ul>
+      <esp-web-install-button manifest="manifest-full.json">
+        <button slot="activate">Install Full</button>
+        <span slot="unsupported">Use Chrome or Edge on a computer.</span>
+      </esp-web-install-button>
+    </div>
+    <div class="card">
+      <h2>Lite</h2>
+      <p>For portable use without WiFi.</p>
+      <ul>
+        <li>Spectrum, waterfall, CW and FT8 decoders, meters</li>
+        <li>Clock set by hand on the screen, kept accurate by FT8</li>
+        <li>No WiFi: more free memory, simpler start-up</li>
+      </ul>
+      <esp-web-install-button manifest="manifest-lite.json">
+        <button slot="activate">Install Lite</button>
+        <span slot="unsupported">Use Chrome or Edge on a computer.</span>
+      </esp-web-install-button>
+    </div>
+  </div>
+
+  <div class="note">
+    <b>Before you click:</b> connect the board's <b>UART</b> USB port to this computer.
+    On a first install tick <i>Erase device</i>. When updating leave it unticked to keep
+    your WiFi, callsign and settings.<br>
+    After installing, connect the board's <b>USB OTG</b> port to the QMX and switch the
+    QMX's 12&nbsp;V off and on once.
+  </div>
+
+  <p class="sub" style="margin-top:24px">
+    Instructions, release files and source:
+    <a href="https://github.com/OWNER/QMXPan">github.com/OWNER/QMXPan</a> ·
+    Türkçe: <a href="https://github.com/OWNER/QMXPan/blob/main/README.tr.md">README.tr.md</a>
+  </p>
+</main>
+</body>
+</html>

@@ -1,7 +1,7 @@
 //! DX cluster istemcisi: telnet ile bağlanır, çağrı işaretiyle giriş yapar,
 //! "DX de ..." satırlarından spotları toplar. Spotlar spektrumda etiketlenir.
 //!
-//! Varsayılan: dxc.ve7cc.net:23, çağrı işareti TA4SO (kullanıcı onayladı).
+//! Varsayılan: dxc.ve7cc.net:23. Çağrı işareti girilmeden bağlanılmaz.
 //! Ayarlar web sayfasından değişir (NVS: dxon, dxhost, dxport, dxcall).
 
 use std::io::{Read, Write};
@@ -40,7 +40,7 @@ impl Default for Cfg {
             on: true,
             host: "dxc.ve7cc.net".into(),
             port: 23,
-            call: "TA4SO".into(),
+            call: String::new(),
         }
     }
 }
@@ -110,6 +110,11 @@ fn run(nvs: EspNvs<NvsDefault>) {
         let cfg = load_cfg(&nvs);
         if !cfg.on {
             set_state("off");
+            wait_reload(Duration::from_secs(3600));
+            continue;
+        }
+        if cfg.call.is_empty() {
+            set_state("set your callsign");
             wait_reload(Duration::from_secs(3600));
             continue;
         }

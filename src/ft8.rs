@@ -72,7 +72,7 @@ pub struct Status {
     pub last_slot: String,
     pub count: usize,
     pub decode_ms: u32,
-    /// Saat SNTP ile ayarlandı mı
+    /// Saat ayarlı mı (internetten ya da elle)
     pub time_ok: bool,
 }
 
@@ -222,6 +222,18 @@ fn decode(audio: &[f32], block: usize, slot: &str) {
         .collect();
     new.sort_by(|a, b| a.freq.total_cmp(&b.freq));
     info!("FT8 {slot}: {n} mesaj, {ms} ms");
+    // Saat elle kurulduysa (internet yok) çözümlerin zaman kayması (DT) ile
+    // ince ayar: DT'lerin ortancası artıysa saatimiz ileride demektir
+    if slot != "TEST" && new.len() >= 3 && crate::shared::MANUAL_TIME.load(Ordering::SeqCst) {
+        let mut dts: Vec<f32> = new.iter().map(|m| m.dt).collect();
+        dts.sort_by(|a, b| a.total_cmp(b));
+        let med = dts[dts.len() / 2];
+        if med.abs() > 0.15 {
+            let corr = -(med * 800.0) as i64;
+            info!("FT8 saat düzeltmesi: DT ortancası {med:+.2} sn, saat {corr:+} ms");
+            crate::shared::nudge_clock(corr);
+        }
+    }
     for m in &new {
         info!("  {} {:+3} {:+4.1} {:4.0} {}", m.slot, m.snr, m.dt, m.freq, m.text);
     }

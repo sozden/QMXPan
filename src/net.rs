@@ -6,7 +6,7 @@
 //! - POST /api/ota: `espflash save-image` ile üretilen .bin yüklenir, bitince
 //!   ana döngüden QMX bağlantısı düzgünce kapatılıp kart yeniden başlatılır.
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -49,21 +49,7 @@ pub static STATUS: Mutex<Status> = Mutex::new(Status {
     ip: String::new(),
 });
 
-/// OTA ilerlemesi: 0 = yok, 1..=100 = yazılıyor, 101 = bitti
-pub static OTA: AtomicU8 = AtomicU8::new(0);
-/// Web'den istenen sayfa: 0 yok, 1 panadapter, 2 METERS, 3 PROPAGATION
-pub static GOTO: AtomicU8 = AtomicU8::new(0);
-/// Ekran başarımı (ana döngü her 10 sn'de yazar; /api/ft8 ile okunur)
-pub static PERF: Mutex<String> = Mutex::new(String::new());
-
-/// Ana döngüye "QMX'i bırak ve yeniden başlat" isteği
-pub static RESTART: AtomicBool = AtomicBool::new(false);
-
-/// S-metre kalibrasyonu: dBm = dBFS + CAL (onda bir dB). Varsayılan -2.0 dB,
-/// orijinal projenin "kukla yükte gürültü tabanı ≈ -130 dBm" ölçüsüne göre kaba tahmin.
-pub static CAL_TENTHS: AtomicI32 = AtomicI32::new(-20);
-/// Ana döngünün ölçtüğü son S-metre değeri (dBFS, onda bir dB); kalibrasyonda kullanılır
-pub static SMETER_DBFS_TENTHS: AtomicI32 = AtomicI32::new(i32::MIN);
+use crate::shared::{CAL_TENTHS, GOTO, OTA, PERF, RESTART, SMETER_DBFS_TENTHS};
 
 fn set_status(mode: Mode, ssid: &str, ip: &str) {
     *STATUS.lock().unwrap() = Status {
@@ -99,10 +85,6 @@ fn load_creds(nvs: &EspNvs<NvsDefault>) -> Option<(String, String)> {
 fn run(modem: Modem<'static>, sysloop: EspSystemEventLoop, part: EspDefaultNvsPartition) -> Result<()> {
     let nvs = EspNvs::new(part.clone(), NS, true)?;
     let creds = load_creds(&nvs);
-    if let Ok(Some(c)) = nvs.get_i32("cal") {
-        CAL_TENTHS.store(c, Ordering::Relaxed);
-        info!("S-metre kalibrasyonu: {:+.1} dB", c as f32 / 10.0);
-    }
     let nvs = std::sync::Arc::new(Mutex::new(nvs));
 
     let mut wifi = BlockingWifi::wrap(EspWifi::new(modem, sysloop.clone(), Some(part))?, sysloop)?;
@@ -152,7 +134,8 @@ fn run(modem: Modem<'static>, sysloop: EspSystemEventLoop, part: EspDefaultNvsPa
     let _server = http_server(nvs)?;
     // FT8 için UTC saati (15 sn dilimleri saniyenin altında doğru olmalı)
     let _sntp = if connected {
-        match esp_idf_svc::sntp::EspSntp::new_default() {
+        let conf = esp_idf_svc::sntp::SntpConf::default();
+        match esp_idf_svc::sntp::EspSntp::new_with_callback(&conf, |_| crate::shared::ntp_synced()) {
             Ok(s) => {
                 info!("SNTP başlatıldı");
                 Some(s)
@@ -247,7 +230,7 @@ fn index_page(dx: &crate::dx::Cfg) -> String {
         Mode::Off => "Off".to_string(),
     };
     format!(
-        "{PAGE_HEAD}<p>Version {ver}<br>WiFi: {wifi}</p>\
+        "{PAGE_HEAD}<p>Version {ver} ({ed})<br>WiFi: {wifi}</p>\
 <h2>WiFi network</h2><form method=post action=/wifi>\
 <input name=ssid placeholder='Network name (SSID)' required>\
 <input name=pass type=password placeholder='Password'>\
@@ -268,7 +251,16 @@ then enter its level:</p><form method=post action=/cal>\
 <form method=post action=/qth>\
 <input name=loc value='{qth}' placeholder='Your locator for the map, e.g. KM69 or KM69ab'>\
 <button>Save</button></form>\
-<p>Firmware update: <code>tools\\ota.ps1 -Kart {ip}</code></p></body></html>",
+<h2>Firmware update</h2><p>Choose <code>qmxpan-full-ota.bin</code> from the release page.</p>\
+<input type=file id=fw accept='.bin'><button onclick='up()'>Upload</button><p id=st></p>\
+<script>async function up(){{const f=document.getElementById('fw').files[0],s=document.getElementById('st');\
+if(!f){{s.textContent='Choose a file first';return}}\
+for(let i=1;i<=3;i++){{s.textContent='Uploading ('+i+'/3)...';\
+try{{const r=await fetch('/api/ota',{{method:'POST',body:f}});const t=await r.text();\
+if(r.ok){{s.textContent='Done. QMXPan restarts; power-cycle the QMX if it does not reconnect.';return}}s.textContent=t}}\
+catch(e){{s.textContent='Connection lost, retrying...'}}\
+await new Promise(r=>setTimeout(r,3000))}}}}</script>\
+<p style='color:#888'>Developers: <code>tools\\ota.ps1 -Kart {ip}</code></p></body></html>",
         dx_on = if dx.on { "checked" } else { "" },
         dx_host = html_escape(&dx.host),
         dx_port = dx.port,
@@ -276,6 +268,7 @@ then enter its level:</p><form method=post action=/cal>\
         sol_state = html_escape(&crate::solar::STATE.lock().unwrap()),
         qth = html_escape(&crate::solar::QTH.lock().unwrap()),
         ver = env!("CARGO_PKG_VERSION"),
+        ed = crate::shared::EDITION,
         ip = if st.ip.is_empty() { "IP" } else { &st.ip },
         now = now_dbm()
             .map(|d| format!("{d:.1} dBm ({})", crate::ui::s_units(d)))
@@ -365,12 +358,13 @@ fn http_server(nvs: std::sync::Arc<Mutex<EspNvs<NvsDefault>>>) -> Result<EspHttp
             let host = form_value(&body, "host").unwrap_or_default().trim().to_string();
             let call = form_value(&body, "call").unwrap_or_default().trim().to_ascii_uppercase();
             let port = form_value(&body, "port").and_then(|p| p.trim().parse::<u16>().ok());
-            let (Some(port), false, false) = (port, host.is_empty() || host.len() > 60, call.len() < 3 || call.len() > 12) else {
+            let (Some(port), false, true) = (port, host.is_empty() || host.len() > 60, crate::shared::valid_call(&call)) else {
                 req.into_status_response(400)?.write_all(b"invalid host, port or callsign\n")?;
                 return Ok(());
             };
             let cfg = crate::dx::Cfg { on: form_value(&body, "on").is_some(), host, port, call };
             crate::dx::save_cfg(&nvs.lock().unwrap(), &cfg)?;
+            *crate::shared::MYCALL.lock().unwrap() = cfg.call.clone();
             crate::dx::RELOAD.store(true, Ordering::SeqCst);
             info!("DX cluster ayarları kaydedildi: {cfg:?}");
             req.into_ok_response()?.write_all(
@@ -638,12 +632,4 @@ fn receive_ota(req: &mut Req, len: usize) -> Result<()> {
     // complete(): imajı doğrular, bir sonraki açılışta bu bölümü seçer
     update.complete()?;
     Ok(())
-}
-
-/// Yeni yazılım düzgün açıldıysa geri dönüşü iptal eder.
-pub fn mark_valid() {
-    match EspOta::new().and_then(|mut o| o.mark_running_slot_valid()) {
-        Ok(()) => info!("Çalışan yazılım sağlam olarak işaretlendi"),
-        Err(e) => warn!("Yazılım işaretlenemedi: {e}"),
-    }
 }

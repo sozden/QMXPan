@@ -1,0 +1,65 @@
+# Bir sürüm etiketi (v0.14.0 gibi) gönderilince Full ve Lite paketlerini derler,
+# GitHub Releases'e ekler ve tarayıcıdan yükleme sayfasını GitHub Pages'e koyar.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust ESP toolchain
+        uses: esp-rs/xtensa-toolchain@v1.5
+        with:
+          default: true
+          buildtargets: esp32s3
+          ldproxy: true
+
+      - name: Install espflash
+        run: cargo install espflash@4.5.0 --locked
+
+      - name: Use paths of this runner
+        run: |
+          # sdkconfig'deki bölüm tablosu yolu ve hedef klasör geliştiricinin Windows makinesine göre
+          sed -i "s#D:/QMXPan#${GITHUB_WORKSPACE}#" sdkconfig.defaults
+          sed -i 's#^target-dir = .*##' .cargo/config.toml
+
+      - name: Build Full and Lite
+        shell: pwsh
+        run: ./tools/package.ps1 -Target "${{ github.workspace }}/target"
+
+      - name: Prepare the installer page
+        run: cp site/index.html dist/web/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/web
+
+      - name: Attach files to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/qmxpan-full-*.bin
+            dist/qmxpan-full-ota-*.bin
+            dist/qmxpan-lite-*.bin
+
+  pages:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

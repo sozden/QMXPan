@@ -429,8 +429,11 @@ impl Ui {
     /// Üst şeritte, başlığın sağında UTC saati
     fn draw_utc(&self, fb: &mut Framebuffer, utc: &str) {
         gfx::fill(fb, UTC_X, 0, 128, TOP_H, th::PN);
-        if !utc.is_empty() {
-            let x = text(fb, &F_B12, UTC_X, 20, "UTC", th::MU);
+        let x = text(fb, &F_B12, UTC_X, 20, "UTC", th::MU);
+        if utc.is_empty() {
+            // Saat bilinmiyor: dokununca istasyon penceresinden kurulur
+            text(fb, &F_B14, x + 6, 20, "set clock", th::MU);
+        } else {
             text(fb, &F_B16, x + 6, 21, utc, th::AM);
         }
     }
@@ -583,7 +586,11 @@ impl Ui {
         rrect(fb, 12, y0 + 6, 40, 16, 8, th::AM);
         text_c(fb, &F_B12, 32, y0 + 18, "FT8", th::ON_AM);
         let head = if !st.time_ok {
-            "waiting for UTC time (WiFi / SNTP)...".to_string()
+            if crate::shared::ONLINE {
+                "waiting for UTC time (WiFi) - or tap UTC at the top to set the clock".to_string()
+            } else {
+                "clock not set - tap UTC at the top to set it".to_string()
+            }
         } else if st.last_slot.is_empty() {
             "listening - first decode after the next 15 s slot".to_string()
         } else {
@@ -1293,6 +1300,7 @@ const SP_MINUS_X: i32 = 150;
 const SP_PLUS_X: i32 = 316;
 const SP_BTN: (i32, i32) = (48, 34);
 const SP_RESET: (i32, i32, i32, i32) = (W as i32 - 112, SP_Y + 6, 100, 24);
+const SP_STATION: (i32, i32, i32, i32) = (W as i32 - 290, SP_Y + 6, 166, 24);
 
 const SET_LABELS: [&str; 6] = [
     "WF bright",
@@ -1306,6 +1314,7 @@ const SET_LABELS: [&str; 6] = [
 pub enum SettingsHit {
     Step(usize, bool),
     Reset,
+    Station,
     Inside,
     Outside,
 }
@@ -1333,6 +1342,9 @@ pub fn draw_settings(fb: &mut Framebuffer, s: &Settings) {
     let (rx, ry, rw, rh) = SP_RESET;
     rrect(fb, rx, ry, rw, rh, 12, th::PN2);
     text_c(fb, &F_B14, rx + rw / 2, ry + 17, "Reset", th::TX);
+    let (sx, sy, sw, sh) = SP_STATION;
+    rrect(fb, sx, sy, sw, sh, 12, th::PN2);
+    text_c(fb, &F_B14, sx + sw / 2, sy + 17, "Callsign & clock", th::CY);
 
     for i in 0..6 {
         let (x, y) = set_cell(i);
@@ -1355,6 +1367,10 @@ pub fn settings_hit(x: i32, y: i32) -> SettingsHit {
     if x >= rx && x < rx + rw && y >= ry - 4 && y < ry + rh + 4 {
         return SettingsHit::Reset;
     }
+    let (sx, sy, sw, sh) = SP_STATION;
+    if x >= sx && x < sx + sw && y >= sy - 4 && y < sy + sh + 4 {
+        return SettingsHit::Station;
+    }
     for i in 0..6 {
         let (cx, cy) = set_cell(i);
         for (bx, up) in [(SP_MINUS_X, false), (SP_PLUS_X, true)] {
@@ -1364,4 +1380,132 @@ pub fn settings_hit(x: i32, y: i32) -> SettingsHit {
         }
     }
     SettingsHit::Inside
+}
+
+// ------------------------------------------------------ istasyon penceresi
+// Çağrı işareti (dokunmatik klavye) ve elle UTC saati. Band penceresinin
+// yerinde açılır; açıkken spektrum/şelale çizilmez.
+
+const ST_Y: i32 = SPEC_Y as i32;
+const ST_H: i32 = (WF_Y + WF_H) as i32 - SPEC_Y as i32 - 2;
+const KB_ROWS: [&str; 4] = ["1234567890", "QWERTYUIOP", "ASDFGHJKL/", "ZXCVBNM"];
+const KB_X: i32 = 30;
+const KB_COL: i32 = 74;
+const KB_W: i32 = 68;
+const KB_H: i32 = 36;
+const KB_Y: i32 = ST_Y + 72;
+const KB_STEP: i32 = 41;
+const ST_TIME_Y: i32 = KB_Y + 4 * KB_STEP + 6;
+const ST_BTN_H: i32 = 44;
+const ST_CANCEL: (i32, i32) = (476, 140);
+const ST_SAVE: (i32, i32) = (630, 150);
+/// Saat satırı: (x, genişlik) — saat −/+, dakika −/+, AYARLA
+const ST_HM: [i32; 4] = [150, 206, 350, 406];
+const ST_SET: (i32, i32) = (560, 220);
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum StationHit {
+    Key(char),
+    Del,
+    Cancel,
+    Save,
+    Hour(bool),
+    Min(bool),
+    SetTime,
+    Inside,
+    Outside,
+}
+
+fn kb_rect(row: usize, col: usize) -> (i32, i32) {
+    (KB_X + col as i32 * KB_COL, KB_Y + row as i32 * KB_STEP)
+}
+
+/// Klavyedeki DEL tuşu: son sıranın sağında, üç tuş genişliğinde
+fn del_rect() -> (i32, i32, i32) {
+    let (x, y) = kb_rect(3, 7);
+    (x, y, 3 * KB_COL - (KB_COL - KB_W))
+}
+
+/// `call`: düzenlenen çağrı işareti, `hh`/`mm`: kurulacak UTC saati
+pub fn draw_station(fb: &mut Framebuffer, call: &str, hh: u32, mm: u32) {
+    gfx::fill(fb, 0, ST_Y, W as i32, ST_H + 2, th::BG);
+    rrect(fb, 0, ST_Y, W as i32, ST_H, 10, th::CY);
+    rrect(fb, 1, ST_Y + 1, W as i32 - 2, ST_H - 2, 9, th::PN);
+    text(fb, &F_B16, 16, ST_Y + 26, "Station", th::TX);
+    text(fb, &F_R11, 16, ST_Y + 46, "callsign", th::MU);
+    // Çağrı işareti kutusu
+    rrect(fb, 120, ST_Y + 10, 340, 50, 8, th::BG);
+    let x = text(fb, &F_B30, 134, ST_Y + 46, call, th::AM);
+    if call.len() < 12 {
+        gfx::fill(fb, x + 3, ST_Y + 48, 16, 3, th::AM);
+    }
+    for ((bx, bw), l, bg, fg) in [(ST_CANCEL, "CANCEL", th::PN2, th::TX), (ST_SAVE, "SAVE", th::CY, th::ON_CY)] {
+        rrect(fb, bx, ST_Y + 13, bw, ST_BTN_H, 8, bg);
+        text_c(fb, &F_B16, bx + bw / 2, ST_Y + 41, l, fg);
+    }
+    // Klavye
+    for (r, row) in KB_ROWS.iter().enumerate() {
+        for (c, ch) in row.chars().enumerate() {
+            let (x, y) = kb_rect(r, c);
+            rrect(fb, x, y, KB_W, KB_H, 6, th::PN2);
+            let mut b = [0u8; 4];
+            text_c(fb, &F_B16, x + KB_W / 2, y + 25, ch.encode_utf8(&mut b), th::TX);
+        }
+    }
+    let (dx, dy, dw) = del_rect();
+    rrect(fb, dx, dy, dw, KB_H, 6, th::PN2);
+    text_c(fb, &F_B16, dx + dw / 2, dy + 25, "DEL", th::AM);
+    // Saat satırı
+    let y = ST_TIME_Y;
+    text(fb, &F_B14, 30, y + 26, "UTC", th::MU);
+    text_c(fb, &F_B30, 104, y + 34, &format!("{hh:02}"), th::TX);
+    text_c(fb, &F_B30, 278, y + 34, ":", th::MU);
+    text_c(fb, &F_B30, 304 - 0, y + 34, &format!("{mm:02}"), th::TX);
+    for (i, &bx) in ST_HM.iter().enumerate() {
+        rrect(fb, bx, y, 48, KB_H, 6, th::PN2);
+        text_c(fb, &F_B16, bx + 24, y + 25, if i % 2 == 0 { "−" } else { "+" }, th::CY);
+    }
+    let (sx, sw) = ST_SET;
+    rrect(fb, sx, y, sw, KB_H, 6, th::AM);
+    text_c(fb, &F_B16, sx + sw / 2, y + 25, "SET CLOCK at :00", th::ON_AM);
+}
+
+pub fn station_hit(x: i32, y: i32) -> StationHit {
+    if y < ST_Y || y >= ST_Y + ST_H {
+        return StationHit::Outside;
+    }
+    let inside = |bx: i32, by: i32, bw: i32, bh: i32| x >= bx - 3 && x < bx + bw + 3 && y >= by - 2 && y < by + bh + 2;
+    if inside(ST_CANCEL.0, ST_Y + 13, ST_CANCEL.1, ST_BTN_H) {
+        return StationHit::Cancel;
+    }
+    if inside(ST_SAVE.0, ST_Y + 13, ST_SAVE.1, ST_BTN_H) {
+        return StationHit::Save;
+    }
+    for (r, row) in KB_ROWS.iter().enumerate() {
+        for (c, ch) in row.chars().enumerate() {
+            let (bx, by) = kb_rect(r, c);
+            if inside(bx, by, KB_W, KB_H) {
+                return StationHit::Key(ch);
+            }
+        }
+    }
+    let (dx, dy, dw) = del_rect();
+    if inside(dx, dy, dw, KB_H) {
+        return StationHit::Del;
+    }
+    for (i, &bx) in ST_HM.iter().enumerate() {
+        if inside(bx, ST_TIME_Y, 48, KB_H) {
+            let up = i % 2 == 1;
+            return if i < 2 { StationHit::Hour(up) } else { StationHit::Min(up) };
+        }
+    }
+    if inside(ST_SET.0, ST_TIME_Y, ST_SET.1, KB_H) {
+        return StationHit::SetTime;
+    }
+    StationHit::Inside
+}
+
+/// Üst şeritteki UTC saatine dokunuldu mu (istasyon penceresini açar)
+pub fn utc_at(x: i32, y: i32) -> bool {
+    y < TOP_H + 6 && (UTC_X - 8..UTC_X + 136).contains(&x)
 }

@@ -4,11 +4,15 @@
 //! çizer. CAT ile frekans/mod okunur; spektruma ya da şelaleye dokunmak
 //! QMX'i o frekansa ayarlar. CW çözücü ve FT8 alma da vardır.
 
+// Lite derlemede yalnız internet işlerinin kullandığı parçalar boşta kalır
+#![cfg_attr(not(feature = "online"), allow(dead_code, unused_mut))]
+
 mod audio;
 mod bands;
 mod board;
 mod cw;
 mod dsp;
+#[cfg(feature = "online")]
 mod dx;
 mod fonts;
 mod ft8;
@@ -16,9 +20,13 @@ mod morse;
 mod gfx;
 mod lcd;
 mod meters;
+#[cfg(feature = "online")]
 mod net;
+#[cfg(feature = "online")]
 mod prop;
 mod settings;
+mod shared;
+#[cfg(feature = "online")]
 mod solar;
 mod task;
 mod touch;
@@ -39,7 +47,7 @@ use usb::{Cat, Ev, IqStats, IqStream};
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
-    info!("QMXPan {} başlıyor", env!("CARGO_PKG_VERSION"));
+    info!("QMXPan {} ({}) başlıyor", env!("CARGO_PKG_VERSION"), shared::EDITION);
 
     // Ana döngü (ekran/dokunma/CAT) varsayılan 1 önceliğinde kalırsa öncelik
     // 5'teki her iş parçacığı onu bekletir; 4'e çıkar
@@ -58,7 +66,7 @@ fn main() -> anyhow::Result<()> {
     // OTA geri dönüşünü iptal et: ekran başlamadan ÖNCE yapılmalı. İşaretleme
     // flash'ı belleğe eşlerken önbelleği bir an dondurur; ekran çalışıyorsa
     // RGB kesmesi PSRAM'deki görüntüyü okumaya çalışıp kartı çökertiyor.
-    net::mark_valid();
+    shared::mark_valid();
     let mut fb = lcd::init()?;
     let mut ui = ui::Ui::new(&mut fb);
 
@@ -66,7 +74,12 @@ fn main() -> anyhow::Result<()> {
     let band_mem = bands::Memory::new(nvs_part.clone());
     let set_store = settings::Store::new(nvs_part.clone());
     ui.apply_settings(set_store.load());
+    shared::load(nvs_part.clone());
     let mut settings_open = false;
+    // İstasyon penceresi (çağrı işareti ve elle saat) ve düzenlenen değerler
+    let mut station_open = false;
+    let mut st_call = String::new();
+    let (mut st_hh, mut st_mm) = (0u32, 0u32);
     // Şelale alanındaki panel (CW metni / FT8 listesi) ve en son çizilen içerik
     let mut panel = ui::Panel::None;
     // FT8: 0 kapalı, 1 liste, 2 şelale + spektrum etiketleri
@@ -78,14 +91,17 @@ fn main() -> anyhow::Result<()> {
     ft8::start();
     // Ayar değişince NVS'ye hemen değil, 2 sn sonra bir kez yazılır
     let mut settings_dirty: Option<Instant> = None;
-    dx::start(nvs_part.clone());
-    solar::start();
     meters::prebuild();
-    net::start(
-        p.modem,
-        esp_idf_svc::eventloop::EspSystemEventLoop::take()?,
-        nvs_part,
-    );
+    #[cfg(feature = "online")]
+    {
+        dx::start(nvs_part.clone());
+        solar::start();
+        net::start(
+            p.modem,
+            esp_idf_svc::eventloop::EspSystemEventLoop::take()?,
+            nvs_part.clone(),
+        );
+    }
     let mut band_popup = false;
     // S-metre (dBFS, geçiş bandındaki en güçlü bin; hızlı yükselir, yavaş düşer)
     let mut smeter: Option<f32> = None;
@@ -152,7 +168,7 @@ fn main() -> anyhow::Result<()> {
 
     loop {
         // OTA bitti ya da WiFi ayarı değişti: QMX'i düzgünce bırakıp yeniden başla
-        if net::RESTART.load(std::sync::atomic::Ordering::SeqCst) {
+        if shared::RESTART.load(std::sync::atomic::Ordering::SeqCst) {
             info!("Yeniden başlatılıyor: önce QMX bağlantısı kapatılıyor");
             if let Some(c) = cat.take() {
                 c.close();
@@ -321,13 +337,14 @@ fn main() -> anyhow::Result<()> {
         // Web'den sayfa değiştirme (uzaktan ekran denetimi)
         let mut close_sub = false;
         let mut want_zoom: Option<u32> = None;
-        match net::GOTO.swap(0, std::sync::atomic::Ordering::SeqCst) {
+        match shared::GOTO.swap(0, std::sync::atomic::Ordering::SeqCst) {
             1 if meters_open => close_sub = true,
             g @ (2 | 3) => {
                 if !meters_open {
-                    if band_popup || settings_open {
+                    if band_popup || settings_open || station_open {
                         band_popup = false;
                         settings_open = false;
+                        station_open = false;
                         ui.set_spectrum_hidden(false);
                     }
                     meters_open = true;
@@ -359,12 +376,65 @@ fn main() -> anyhow::Result<()> {
                     }
                     pressed = true;
                 }
+                Some(Some((x, y))) if station_open => {
+                    if !pressed {
+                        let mut close = false;
+                        match ui::station_hit(x as i32, y as i32) {
+                            ui::StationHit::Key(ch) if st_call.len() < 12 => st_call.push(ch),
+                            ui::StationHit::Del => {
+                                st_call.pop();
+                            }
+                            ui::StationHit::Hour(up) => st_hh = (st_hh + if up { 1 } else { 23 }) % 24,
+                            ui::StationHit::Min(up) => st_mm = (st_mm + if up { 1 } else { 59 }) % 60,
+                            ui::StationHit::SetTime => {
+                                shared::set_manual_time(st_hh, st_mm);
+                                notice = Some((format!("Clock set to {st_hh:02}:{st_mm:02}:00 UTC"), Instant::now()));
+                                last_hdr = Instant::now() - Duration::from_secs(1);
+                            }
+                            ui::StationHit::Save => {
+                                if st_call.is_empty() || shared::valid_call(&st_call) {
+                                    shared::save_call(nvs_part.clone(), &st_call);
+                                    #[cfg(feature = "online")]
+                                    dx::RELOAD.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    close = true;
+                                } else {
+                                    notice = Some(("Invalid callsign".into(), Instant::now()));
+                                    last_hdr = Instant::now() - Duration::from_secs(1);
+                                }
+                            }
+                            ui::StationHit::Cancel | ui::StationHit::Outside => close = true,
+                            _ => {}
+                        }
+                        if close {
+                            station_open = false;
+                            ui::clear_band_popup(&mut fb);
+                            ui.set_spectrum_hidden(false);
+                            ui.redraw_all();
+                            scale_for = None;
+                            cw_drawn = None;
+                            ft8_drawn = None;
+                            let p = panel;
+                            ui.set_panel(&mut fb, ui::Panel::None);
+                            ui.set_panel(&mut fb, p);
+                            swallow = true;
+                        } else {
+                            ui::draw_station(&mut fb, &st_call, st_hh, st_mm);
+                        }
+                    }
+                    pressed = true;
+                }
                 Some(Some((x, y))) if settings_open => {
                     if !pressed {
                         let mut s = ui.settings();
                         match ui::settings_hit(x as i32, y as i32) {
                             ui::SettingsHit::Step(i, up) => s.step(i, up),
                             ui::SettingsHit::Reset => s = settings::Settings::default(),
+                            ui::SettingsHit::Station => {
+                                settings_open = false;
+                                station_open = true;
+                                open_station(&mut st_call, &mut st_hh, &mut st_mm);
+                                ui::draw_station(&mut fb, &st_call, st_hh, st_mm);
+                            }
                             ui::SettingsHit::Inside => {}
                             ui::SettingsHit::Outside => {
                                 settings_open = false;
@@ -503,6 +573,11 @@ fn main() -> anyhow::Result<()> {
                                 }
                                 _ => {}
                             }
+                        } else if ui::utc_at(x as i32, y as i32) {
+                            station_open = true;
+                            ui.set_spectrum_hidden(true);
+                            open_station(&mut st_call, &mut st_hh, &mut st_mm);
+                            ui::draw_station(&mut fb, &st_call, st_hh, st_mm);
                         } else if let (Some(m), Some(c)) =
                             (ui::mode_chip_at(x as i32, y as i32), cat.as_ref())
                         {
@@ -639,11 +714,11 @@ fn main() -> anyhow::Result<()> {
                 _ => p,                                 // anında yükseliş
             };
             smeter = Some(v);
-            net::SMETER_DBFS_TENTHS
+            shared::SMETER_DBFS_TENTHS
                 .store((v * 10.0) as i32, std::sync::atomic::Ordering::Relaxed);
 
             // Band penceresi ya da METERS açıkken spektrum/şelale çizilmez
-            if !band_popup && !meters_open {
+            if !band_popup && !meters_open && !station_open {
                 let t0 = Instant::now();
                 ui.frame(&mut fb, &mut db, szoom, dial);
                 draw_us += t0.elapsed().as_micros() as u64;
@@ -659,7 +734,7 @@ fn main() -> anyhow::Result<()> {
         if meters_open && sub_tab == meters::Tab::Meters {
             if let Some(m) = meters.as_mut() {
                 let s = stats.lock().unwrap().clone();
-                let cal = net::CAL_TENTHS.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
+                let cal = shared::CAL_TENTHS.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
                 let band = dial.and_then(bands::band_of).map(|i| format!("{}m · ", bands::BANDS[i].name));
                 let bw = match ui::passband(&mode, fw).map(|(a, b)| b - a) {
                     Some(v) if v >= 1000 => format!(" · {:.1} kHz", v as f32 / 1000.0),
@@ -678,12 +753,12 @@ fn main() -> anyhow::Result<()> {
             }
         }
         // Band penceresi açıkken ölçek çizilmez (pencerenin alt sırasının üstüne biniyordu)
-        if !settings_open && !meters_open && !band_popup && scale_for != Some(dial) {
+        if !settings_open && !meters_open && !band_popup && !station_open && scale_for != Some(dial) {
             ui.scale(&mut fb, dial);
             scale_for = Some(dial);
         }
         // CW paneli: metin ya da durum değiştiyse yeniden çiz
-        if panel == ui::Panel::Cw && !band_popup && !meters_open {
+        if panel == ui::Panel::Cw && !band_popup && !meters_open && !station_open {
             let now = (cw::TEXT.lock().unwrap().clone(), *cw::STAT.lock().unwrap(), dial);
             if cw_drawn.as_ref() != Some(&now) {
                 ui.draw_cw_panel(&mut fb, &now.0, &now.1, now.2);
@@ -692,13 +767,14 @@ fn main() -> anyhow::Result<()> {
         }
         // FT8 listesi: yeni çözüm geldiyse ya da saat durumu değiştiyse
         ft8::DIAL.store(dial.unwrap_or(0) as u32, std::sync::atomic::Ordering::Relaxed);
-        if ft8_mode > 0 && !band_popup && !meters_open {
+        if ft8_mode > 0 && !band_popup && !meters_open && !station_open {
             let st = ft8::STATUS.lock().unwrap().clone();
             let now = (ft8::GEN.load(std::sync::atomic::Ordering::SeqCst), st.time_ok);
             if ft8_drawn != Some(now) {
                 let msgs = ft8::MSGS.lock().unwrap().clone();
+                let mycall = shared::MYCALL.lock().unwrap().clone();
                 if panel == ui::Panel::Ft8 {
-                    ui.draw_ft8_panel(&mut fb, &msgs, &st, MYCALL);
+                    ui.draw_ft8_panel(&mut fb, &msgs, &st, &mycall);
                 }
                 // Son dilimde çözülen istasyonlar spektrumda etiketlenir
                 ft8_labels = msgs
@@ -706,7 +782,7 @@ fn main() -> anyhow::Result<()> {
                     .filter(|m| m.slot == st.last_slot && m.dial != 0)
                     .filter_map(|m| {
                         let call = m.sender()?;
-                        let color = if m.text.contains(MYCALL) {
+                        let color = if !mycall.is_empty() && m.text.contains(mycall.as_str()) {
                             gfx::th::AM
                         } else if m.text.starts_with("CQ ") {
                             gfx::th::GR
@@ -732,11 +808,14 @@ fn main() -> anyhow::Result<()> {
                 let half = v.px_to_hz(ui::W_HALF);
                 let lo = (c - half).max(0) as u64;
                 let hi = (c + half).max(0) as u64;
+                #[cfg(feature = "online")]
                 for s in dx::in_range(lo, hi) {
                     if !labels.iter().any(|l| l.text == s.call) {
                         labels.push(ui::Label { rf: s.freq_hz, text: s.call, color: gfx::th::VI });
                     }
                 }
+                #[cfg(not(feature = "online"))]
+                let _ = (lo, hi);
             }
             ui.set_labels(labels);
         }
@@ -761,7 +840,7 @@ fn main() -> anyhow::Result<()> {
                 (Some(_), true, false) => ("IQ mode OFF".to_string(), false),
                 (Some(_), true, true) => (format!("IQ {:.1} kHz", s.rate / 1000.0), true),
             };
-            let ota = net::OTA.load(std::sync::atomic::Ordering::Relaxed);
+            let ota = shared::OTA.load(std::sync::atomic::Ordering::Relaxed);
             if notice.as_ref().is_some_and(|(_, t)| t.elapsed() >= Duration::from_secs(5)) {
                 notice = None;
             }
@@ -772,21 +851,8 @@ fn main() -> anyhow::Result<()> {
             } else {
                 (status, ok)
             };
-            let st = net::STATUS.lock().unwrap().clone();
-            let net_line = match st.mode {
-                net::Mode::Station => {
-                    let n = dx::SPOTS.lock().unwrap().len();
-                    if dx::STATE.lock().unwrap().as_str() == "connected" {
-                        format!("DX {n} · {}", st.ip)
-                    } else {
-                        st.ip.clone()
-                    }
-                }
-                net::Mode::SetupAp => format!("Setup: {} -> {}", st.ssid, st.ip),
-                net::Mode::Connecting => format!("WiFi {}...", st.ssid),
-                net::Mode::Off => String::new(),
-            };
-            let cal = net::CAL_TENTHS.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
+            let net_line = net_line();
+            let cal = shared::CAL_TENTHS.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
             ui.set_cal(cal);
             let sm = if ok && s.running && iq_on {
                 smeter.map(|v| (v + cal).round() as i32)
@@ -820,7 +886,7 @@ fn main() -> anyhow::Result<()> {
                     free_internal()
                 );
                 info!("Ekran: {line}");
-                *net::PERF.lock().unwrap() = line;
+                *shared::PERF.lock().unwrap() = line;
             }
             frames = 0;
             draw_us = 0;
@@ -833,9 +899,6 @@ fn main() -> anyhow::Result<()> {
         loop_t = Instant::now();
     }
 }
-
-/// FT8 listesinde vurgulanan çağrı işareti
-const MYCALL: &str = "TA4SO";
 
 /// Tuş çubuğunda açık (camgöbeği) gösterilecek tuşlar
 fn keys_active(panel: ui::Panel, ft8_mode: u8) -> Vec<ui::Key> {
@@ -960,5 +1023,54 @@ fn mode_name(md: &str) -> &'static str {
         "7" => "CW-R",
         "9" => "DIGI-R",
         _ => "?",
+    }
+}
+
+/// Üst şeridin sağındaki ağ bilgisi (Lite'ta boş)
+#[cfg(feature = "online")]
+fn net_line() -> String {
+    let st = net::STATUS.lock().unwrap().clone();
+    match st.mode {
+        net::Mode::Station => {
+            let n = dx::SPOTS.lock().unwrap().len();
+            if dx::STATE.lock().unwrap().as_str() == "connected" {
+                format!("DX {n} · {}", st.ip)
+            } else {
+                st.ip.clone()
+            }
+        }
+        net::Mode::SetupAp => format!("Setup: {} -> {}", st.ssid, st.ip),
+        net::Mode::Connecting => format!("WiFi {}...", st.ssid),
+        net::Mode::Off => String::new(),
+    }
+}
+
+#[cfg(not(feature = "online"))]
+fn net_line() -> String {
+    String::new()
+}
+
+/// İstasyon penceresi açılırken düzenleme değerlerini hazırlar
+fn open_station(call: &mut String, hh: &mut u32, mm: &mut u32) {
+    *call = shared::MYCALL.lock().unwrap().clone();
+    if shared::time_unknown() {
+        (*hh, *mm) = (0, 0);
+    } else {
+        // Bir sonraki dakika: kullanıcı saniye :00 olunca SET'e basar
+        let s = (shared::now_us() / 1_000_000 + 60).rem_euclid(86_400) as u32;
+        (*hh, *mm) = (s / 3600, (s / 60) % 60);
+    }
+}
+
+/// Lite'ta yayılım sayfası yok; sekme gizli olduğu için bu hiç açılmaz
+#[cfg(not(feature = "online"))]
+mod prop {
+    pub struct Prop;
+    impl Prop {
+        pub fn new() -> Self {
+            Prop
+        }
+        pub fn enter(&mut self, _: &mut crate::lcd::Framebuffer) {}
+        pub fn update(&mut self, _: &mut crate::lcd::Framebuffer) {}
     }
 }

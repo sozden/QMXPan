@@ -688,7 +688,7 @@ pub fn tab_at(x: i32, y: i32) -> Option<Tab> {
     let hit = |i: usize| x >= key_x(i) && x < key_x(i) + 125;
     if hit(0) {
         Some(Tab::Meters)
-    } else if hit(1) {
+    } else if hit(1) && crate::shared::ONLINE {
         Some(Tab::Prop)
     } else if hit(5) {
         Some(Tab::Back)
@@ -701,6 +701,9 @@ pub fn tab_at(x: i32, y: i32) -> Option<Tab> {
 pub fn draw_tabs(fb: &mut Framebuffer, active: Tab) {
     crate::gfx::fill(fb, 0, KEY_Y - 4, W as i32, H as i32 - KEY_Y + 4, th::BG);
     for (i, t, l) in [(0, Tab::Meters, "METERS"), (1, Tab::Prop, "PROPAGATION"), (5, Tab::Back, "BACK")] {
+        if t == Tab::Prop && !crate::shared::ONLINE {
+            continue;
+        }
         let x = key_x(i);
         let (bg, fg) = if t == active { (th::CY, th::ON_CY) } else { (th::PN2, th::TX) };
         crate::gfx::rrect(fb, x, KEY_Y, 125, KEY_H, 7, bg);
