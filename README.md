@@ -7,6 +7,8 @@ Tap the spectrum to tune the radio.
 
 *Türkçe: [README.tr.md](README.tr.md)*
 
+![QMXPan screens](docs/screens/overview.png)
+
 ## Features
 
 | | Full | Lite |
@@ -88,6 +90,16 @@ This single-file image also clears the stored settings.
    FT8 decoding then trims the clock automatically.
 
 The same window is also under **DISPLAY → Callsign & clock**.
+
+## Screens
+
+| | |
+|---|---|
+| ![Main screen](docs/screens/pan.png) **Main screen:** 48 kHz spectrum and waterfall | ![FT8 list](docs/screens/ft8-list.png) **FT8 list:** decodes, with callsigns on the spectrum |
+| ![FT8 waterfall](docs/screens/ft8-waterfall.png) **FT8 waterfall:** the FT8 sub-band at ×16 | ![CW decoder](docs/screens/cw.png) **CW decoder** |
+| ![Band window](docs/screens/band.png) **Band window** | ![Display settings](docs/screens/display.png) **Display settings** |
+| ![Callsign and clock](docs/screens/station.png) **Callsign & clock** | ![Meters](docs/screens/meters.png) **METERS page** |
+| ![Propagation](docs/screens/prop.png) **PROPAGATION page** (Full) | |
 
 ## Using it
 

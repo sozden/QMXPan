@@ -7,6 +7,8 @@ Spektruma dokununca telsiz o frekansa ayarlanır.
 
 *English: [README.md](README.md)*
 
+![QMXPan ekranları](docs/screens/overview.png)
+
 ## Özellikler
 
 | | Full | Lite |
@@ -82,6 +84,16 @@ Bu tek parça imaj kayıtlı ayarları da siler.
    Sonrasında FT8 çözümleri saati kendiliğinden düzeltir.
 
 Aynı pencere **DISPLAY → Callsign & clock** yolundan da açılır.
+
+## Ekranlar
+
+| | |
+|---|---|
+| ![Ana ekran](docs/screens/pan.png) **Ana ekran:** 48 kHz spektrum ve şelale | ![FT8 listesi](docs/screens/ft8-list.png) **FT8 listesi:** çözümler, çağrı işaretleri spektrumda |
+| ![FT8 şelale](docs/screens/ft8-waterfall.png) **FT8 şelale:** FT8 bölgesi ×16 büyütmede | ![CW çözücü](docs/screens/cw.png) **CW çözücü** |
+| ![Bant penceresi](docs/screens/band.png) **Bant penceresi** | ![Görüntü ayarları](docs/screens/display.png) **Görüntü ayarları** |
+| ![Çağrı işareti ve saat](docs/screens/station.png) **Callsign & clock** | ![METERS](docs/screens/meters.png) **METERS sayfası** |
+| ![PROPAGATION](docs/screens/prop.png) **PROPAGATION sayfası** (Full) | |
 
 ## Kullanım
 
