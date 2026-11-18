@@ -45,8 +45,9 @@ Lite does not start any WiFi at all. That leaves more memory free and gives a si
 
 The [ESP32-S3 4.3" LCD Case](https://www.printables.com/model/1690244-esp32-s3-43-lcd-case)
 on Printables fits the Waveshare board well and leaves both USB ports reachable from the side.
-It sits nicely on top of a QMX+ (photo above). The case is the work of its designer on
-Printables and is not part of QMXPan; check its license on that page.
+It sits nicely on top of a QMX+ (photo above). The case is designed by
+[Andrei S. (@AndreiS_406073)](https://www.printables.com/@AndreiS_406073) and is not part of
+QMXPan; check its license on the model page. Thanks, Andrei!
 
 ## Installing
 
@@ -151,6 +152,7 @@ and writes all release files to `dist/`.
 - Map: [Natural Earth](https://www.naturalearthdata.com/) (public domain).
 - Fonts: Source Sans Pro (SIL Open Font License 1.1).
 - Espressif ESP-IDF and the esp-rs crates.
+- Suggested case: [ESP32-S3 4.3" LCD Case](https://www.printables.com/model/1690244-esp32-s3-43-lcd-case) by Andrei S.
 
 QMX and QMX+ are products of QRP Labs. QMXPan is an independent project and is not
 affiliated with QRP Labs.
