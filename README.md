@@ -7,6 +7,8 @@ Tap the spectrum to tune the radio.
 
 *Türkçe: [README.tr.md](README.tr.md)*
 
+![QMXPan in a 3D-printed case on top of a QMX+](docs/photos/qmxpan-on-qmx-plus.webp)
+
 ![QMXPan screens](docs/screens/overview.png)
 
 ## Features
@@ -38,6 +40,13 @@ Lite does not start any WiFi at all. That leaves more memory free and gives a si
 
 > **QMX+ owners:** use the firmware made for the QMX+. The plain-QMX firmware on a QMX+
 > refuses some bands; QMXPan then shows *"QMX: xx m not available"*.
+
+### Suggested case
+
+The [ESP32-S3 4.3" LCD Case](https://www.printables.com/model/1690244-esp32-s3-43-lcd-case)
+on Printables fits the Waveshare board well and leaves both USB ports reachable from the side.
+It sits nicely on top of a QMX+ (photo above). The case is the work of its designer on
+Printables and is not part of QMXPan; check its license on that page.
 
 ## Installing
 

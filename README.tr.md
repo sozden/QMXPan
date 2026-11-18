@@ -7,6 +7,8 @@ Spektruma dokununca telsiz o frekansa ayarlanır.
 
 *English: [README.md](README.md)*
 
+![QMX+ üzerinde 3D baskı kutusunda QMXPan](docs/photos/qmxpan-on-qmx-plus.webp)
+
 ![QMXPan ekranları](docs/screens/overview.png)
 
 ## Özellikler
@@ -38,6 +40,13 @@ Lite hiç WiFi başlatmaz. Bu sayede daha çok bellek boş kalır ve açılış 
 
 > **QMX+ sahipleri:** QMX+ için olan yazılımı kullanın. Düz QMX yazılımı QMX+ üzerinde bazı
 > bantlara geçmez; QMXPan o zaman *"QMX: xx m not available"* uyarısı gösterir.
+
+### Önerilen kutu
+
+Printables'taki [ESP32-S3 4.3" LCD Case](https://www.printables.com/model/1690244-esp32-s3-43-lcd-case)
+Waveshare kartına tam oturuyor ve iki USB portu yandan erişilebilir kalıyor. QMX+'ın üstünde
+de güzel duruyor (yukarıdaki fotoğraf). Kutu, Printables'taki tasarımcısının eseridir ve
+QMXPan'ın parçası değildir; lisansına o sayfadan bakın.
 
 ## Yükleme
 
