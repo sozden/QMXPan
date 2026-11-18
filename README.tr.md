@@ -46,8 +46,8 @@ Lite hiç WiFi başlatmaz. Bu sayede daha çok bellek boş kalır ve açılış 
 Printables'taki [ESP32-S3 4.3" LCD Case](https://www.printables.com/model/1690244-esp32-s3-43-lcd-case)
 Waveshare kartına tam oturuyor ve iki USB portu yandan erişilebilir kalıyor. QMX+'ın üstünde
 de güzel duruyor (yukarıdaki fotoğraf). Kutuyu
-[Andrei S. (@AndreiS_406073)](https://www.printables.com/@AndreiS_406073) tasarladı; QMXPan'ın
-parçası değildir, lisansına model sayfasından bakın. Teşekkürler Andrei!
+[Andrei S. (@AndreiS_406073)](https://www.printables.com/@AndreiS_406073) tasarladı ve kamu
+malı (CC0) olarak paylaştı. QMXPan'ın parçası değildir. Teşekkürler Andrei!
 
 ## Yükleme
 
@@ -146,7 +146,7 @@ tüm sürüm dosyalarını `dist/` altına yazar.
 - Harita: [Natural Earth](https://www.naturalearthdata.com/) (kamu malı).
 - Yazı tipleri: Source Sans Pro (SIL Open Font License 1.1).
 - Espressif ESP-IDF ve esp-rs kütüphaneleri.
-- Önerilen kutu: Andrei S.'nin [ESP32-S3 4.3" LCD Case](https://www.printables.com/model/1690244-esp32-s3-43-lcd-case) modeli.
+- Önerilen kutu: Andrei S.'nin [ESP32-S3 4.3" LCD Case](https://www.printables.com/model/1690244-esp32-s3-43-lcd-case) modeli (CC0).
 
 QMX ve QMX+ QRP Labs ürünleridir. QMXPan bağımsız bir projedir ve QRP Labs ile bağlantısı yoktur.
 
