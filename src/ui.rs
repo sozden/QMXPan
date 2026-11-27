@@ -108,8 +108,11 @@ impl View {
     }
 }
 
-/// Üst şeritteki mod çipleri (QMX CAT kodları: MD1 LSB, MD2 USB, MD3 CW, MD6 DIGI)
-pub const MODES: [&str; 4] = ["LSB", "USB", "CW", "DIGI"];
+/// Üst şeritteki mod çipleri (QMX CAT kodları: MD1 LSB, MD2 USB, MD3 CW, MD6 DIGI,
+/// MD5 AM — QMX yazılımı 1_04_001'den beri, deneysel ve yalnız alma)
+pub const MODES: [&str; 5] = ["LSB", "USB", "CW", "DIGI", "AM"];
+/// Mod çiplerinden sonraki BW / SPAN / MODE kutularının başladığı x
+const INFO_X: i32 = MODE_X + MODES.len() as i32 * MODE_STEP + 8;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Key {
@@ -188,7 +191,8 @@ pub fn passband(mode: &str, width: Option<u32>) -> Option<(i64, i64)> {
         "USB" | "DIGI" => Some((0, w(2700))),
         "LSB" | "DIGI-R" => Some((-w(2700), 0)),
         "CW" | "CW-R" => Some((-w(300) / 2, w(300) / 2)),
-        "AM" => Some((-w(6000) / 2, w(6000) / 2)),
+        // QMX AM filtresi 150-3200 Hz (ses): taşıyıcının iki yanında 3.2 kHz
+        "AM" => Some((-w(3200), w(3200))),
         "FM" => Some((-w(10000) / 2, w(10000) / 2)),
         _ => None,
     }
@@ -525,10 +529,10 @@ impl Ui {
             Some(v) => format!("{v} Hz"),
             None => "—".into(),
         };
-        chip(fb, 268, 112, "BW", &bws, th::CY);
-        chip(fb, 388, 112, "SPAN", &format!("{} kHz", 48 / zoom.max(1)), if zoom > 1 { th::CY } else { th::TX });
+        chip(fb, INFO_X, 112, "BW", &bws, th::CY);
+        chip(fb, INFO_X + 120, 112, "SPAN", &format!("{} kHz", 48 / zoom.max(1)), if zoom > 1 { th::CY } else { th::TX });
         if !MODES.contains(&mode) && !mode.is_empty() {
-            chip(fb, 508, 112, "MODE", mode, th::AM);
+            chip(fb, INFO_X + 240, 112, "MODE", mode, th::AM);
         }
     }
 

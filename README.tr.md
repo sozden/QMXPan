@@ -16,7 +16,7 @@ Spektruma dokununca telsiz o frekansa ayarlanır.
 | | Full | Lite |
 |---|:-:|:-:|
 | Spektrum + şelale, ×1…×16 büyütme, dokun/sürükle ile ayar | ✓ | ✓ |
-| Bant düğmeleri ve bant başına frekans hafızası; mod çipleri (LSB/USB/CW/DIGI) | ✓ | ✓ |
+| Bant düğmeleri ve bant başına frekans hafızası; mod çipleri (LSB/USB/CW/DIGI/AM) | ✓ | ✓ |
 | CW çözücü, FT8 çözücü (liste ve şelale etiketleri) | ✓ | ✓ |
 | METERS sayfası: ibreli SWR / S-metre / güç, Nixie görünümlü saat | ✓ | ✓ |
 | UTC saati | internetten (NTP) | elle kurulur, FT8 ile kendiliğinden düzeltilir |
@@ -66,7 +66,7 @@ WiFi, çağrı işareti ve ayarlar korunur.
 ya da `qmxpan-lite-<sürüm>.bin` dosyasını indirip `0x0` adresine yazın:
 
 ```bash
-espflash write-bin 0x0 qmxpan-full-0.14.0.bin
+espflash write-bin 0x0 qmxpan-full-0.15.0.bin
 ```
 
 Bu tek parça imaj kayıtlı ayarları da siler.
@@ -113,6 +113,9 @@ Aynı pencere **DISPLAY → Callsign & clock** yolundan da açılır.
 - **FT8** sırayla şunlar arasında geçer: liste → etiketli şelale → kapalı. Şelale görünümü FT8 bölgesine yaklaşır.
 - **CW** CW çözücüyü gösterir.
 - **MENU** METERS sayfasını, Full'da ayrıca PROPAGATION sayfasını açar.
+- **AM** ile yayın istasyonları dinlenir, örneğin 41 m bandı (7,2–7,45 MHz). QMX yazılımının
+  1_04_001 ya da sonrası gerekir; QRP Labs AM'i orada deneysel, yalnız alma ve 3,2 kHz
+  filtreli olarak ekledi. Taşıyıcıya dokununca 1 kHz adımla ayarlanır; ses QMX'ten gelir.
 
 ## Güncelleme
 
@@ -138,6 +141,10 @@ tüm sürüm dosyalarını `dist/` altına yazar.
 
 > `sdkconfig.defaults` içinde `partitions.csv` için mutlak bir yol var
 > (`CONFIG_PARTITION_TABLE_CUSTOM_FILENAME`). Bunu kendi klasörünüze göre değiştirin.
+
+## Katkıda bulunanlar
+
+- Önerileri ve katkıları için **TA2GY Cem Karagöz** ve **TA7MVL Mevlüt Zengin**'e teşekkürler.
 
 ## Teşekkürler
 

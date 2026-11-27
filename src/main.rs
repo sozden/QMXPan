@@ -585,6 +585,7 @@ fn main() -> anyhow::Result<()> {
                                 "LSB" => 1,
                                 "USB" => 2,
                                 "CW" => 3,
+                                "AM" => 5,
                                 _ => 6,
                             };
                             info!("Mod: {m}");

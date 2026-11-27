@@ -16,7 +16,7 @@ Tap the spectrum to tune the radio.
 | | Full | Lite |
 |---|:-:|:-:|
 | Spectrum + waterfall, zoom ×1…×16, tap/drag to tune | ✓ | ✓ |
-| Band buttons with per-band frequency memory, mode chips (LSB/USB/CW/DIGI) | ✓ | ✓ |
+| Band buttons with per-band frequency memory, mode chips (LSB/USB/CW/DIGI/AM) | ✓ | ✓ |
 | CW decoder, FT8 decoder (list and waterfall labels) | ✓ | ✓ |
 | METERS page: analog SWR / S-meter / power meters, Nixie-style clock | ✓ | ✓ |
 | UTC clock | internet (NTP) | set by hand, auto-trimmed by FT8 |
@@ -66,13 +66,13 @@ Download `qmxpan-full-<version>.bin` or `qmxpan-lite-<version>.bin` from the
 [Releases](https://github.com/sozden/QMXPan/releases) page and write it at address `0x0`:
 
 ```bash
-espflash write-bin 0x0 qmxpan-full-0.14.0.bin
+espflash write-bin 0x0 qmxpan-full-0.15.0.bin
 ```
 
 or
 
 ```bash
-esptool.py --chip esp32s3 write_flash 0x0 qmxpan-full-0.14.0.bin
+esptool.py --chip esp32s3 write_flash 0x0 qmxpan-full-0.15.0.bin
 ```
 
 This single-file image also clears the stored settings.
@@ -119,6 +119,9 @@ The same window is also under **DISPLAY → Callsign & clock**.
 - **FT8** steps through: list → waterfall with labels → off. The waterfall view zooms to the FT8 sub-band.
 - **CW** shows the CW decoder.
 - **MENU** opens the METERS page, and on Full also the PROPAGATION page.
+- **AM** listens to AM broadcasts, e.g. the 41 m band (7.2–7.45 MHz). It needs QMX firmware
+  1_04_001 or later, where QRP Labs added AM as an experimental, receive-only mode with a
+  3.2 kHz filter. Tap a carrier to tune to it in 1 kHz steps; the audio comes from the QMX.
 
 ## Updating
 
@@ -144,6 +147,10 @@ and writes all release files to `dist/`.
 
 > `sdkconfig.defaults` holds an absolute path to `partitions.csv`
 > (`CONFIG_PARTITION_TABLE_CUSTOM_FILENAME`). Change it to your checkout path.
+
+## Thanks
+
+- **TA2GY Cem Karagöz** and **TA7MVL Mevlüt Zengin**, for their suggestions and contributions.
 
 ## Credits
 
